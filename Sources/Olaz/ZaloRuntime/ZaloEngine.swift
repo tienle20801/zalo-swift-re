@@ -37,6 +37,9 @@ final class ZaloEngine {
         }
         var step: Step = .generating
         var qrPNG: Data?
+        /// The server asked for a second scan (`error_code -20`, multi-layer QR for device linking): the QR on screen
+        /// is QR2, which the phone must scan before the login can be confirmed.
+        var isSecondQR = false
     }
 
     struct Profile: Equatable {
@@ -450,13 +453,12 @@ final class ZaloEngine {
         let data = json["data"] as? [String: Any] ?? json
         let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
         EngineLog.shared.write("qr-poll \(url.path()) error_code=\(code) data.keys=\(data.keys.sorted())")
-        if code == 0, let name = data["display_name"] as? String, !name.isEmpty {
-            loginTimeout?.cancel()
-            login.step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
-            phase = .login(login)
-        } else if code == -20 {
-            // Multi-layer / Trusted-Device login: phone scanned QR1 and server issued parameters for QR2 (`genSecondQR`).
-            // Keep `.waitingScan` (or return to `.waitingScan`) while `genSecondQR` updates `qrPNG`.
+        // -20 is not an error: the first scan succeeded, but this account logs in with a second QR (device linking,
+        // "multi layer QR login mode"). The official poller turns `data` into QR2 via `genSecondQR` and keeps waiting
+        // for a scan; the page adapter forwards it as `event: "qr2"`. Its `error_message` ("Vui lòng thử lại QR mới.")
+        // must not be shown as a failure.
+        if code == Self.secondQRRequiredCode {
+            login.isSecondQR = true
             if let base64 = data["base64_qr"] as? String, !base64.isEmpty,
                let png = Self.decodeDataURL(base64.hasPrefix("data:") ? base64 : "data:image/png;base64,\(base64)") {
                 login.qrPNG = png
@@ -464,6 +466,12 @@ final class ZaloEngine {
             login.step = .waitingScan
             phase = .login(login)
             scheduleExpiry()
+            return
+        }
+        if code == 0, let name = data["display_name"] as? String, !name.isEmpty {
+            loginTimeout?.cancel()
+            login.step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
+            phase = .login(login)
         } else if code == 18010 || code == -21 {
             // 18010: mobile user rejected login; -21: QR2 relink failed.
             loginTimeout?.cancel()
@@ -474,7 +482,11 @@ final class ZaloEngine {
         // automatically by the official client's `Dr(url, qrTimeout, qrRetry)` loop; never clobber UI here.
     }
 
-    /// The server sets `qr_timeout`; mirror the official page's expiry UI as a fallback if DOM `invalid` has not fired yet.
+    /// `qr-id` poll result meaning "scanned once; show the second (device-linking) QR" — see `Dr`/`genSecondQR` in the
+    /// official `login-startup` chunk.
+    static let secondQRRequiredCode = -20
+
+    /// The server sets `qr_timeout`; mirror the official page's expiry UI as a fallback if DOM `invalid` has not fired yet (~150 s).
     private func scheduleExpiry() {
         loginTimeout?.cancel()
         loginTimeout = Task { [weak self] in

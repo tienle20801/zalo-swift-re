@@ -375,12 +375,14 @@
     const snapshot = () => {
       const root = document.querySelector('.login-qr-page') || document.querySelector('#app-page');
       if (!root) return null;
-      const invalid = !!root.querySelector('.qr--invalid, .qr-img-err, .off--qr-code, .mask:not(.mask--none)');
+      const invalid = !!root.querySelector('img.qr-image--none, .qr--invalid, .qr-img-err, .off--qr-code, .mask:not(.mask--none)');
       const imgs = Array.from(root.querySelectorAll('img')).filter((i) => i.src && i.naturalWidth >= 64);
       const qrImg = root.querySelector('.qr-image img, img.qr-image, .login-qr__frame-qr img') || imgs.find((i) => i.src.startsWith('data:image/png') || i.src.startsWith('data:image/svg'));
       const canvas = root.querySelector('.login-qr__frame-qr canvas, .qr-code canvas');
       let rawQr = qrImg ? qrImg.src : null;
       if (!rawQr && canvas) { try { rawQr = canvas.toDataURL('image/png'); } catch {} }
+      // The official page stops polling after `qr_retry` long-polls (~21 s each, so ~1 min) and marks the QR dead by
+      // renaming its <img> to `qr-image--none` (src becomes a placeholder). Older builds used the other classes.
       // When expired (`invalid`), `.login-qr-page` swaps `img.qr-image` to a dummy static SVG; never report that or the loading spinner as a valid QR.
       const qr = (!invalid && isRealQR(rawQr)) ? rawQr : null;
       const avatar = Array.from(root.querySelectorAll('img')).find((i) => /ava|avatar/.test(i.className + ' ' + i.src) && i !== qrImg);
