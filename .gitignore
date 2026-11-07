@@ -3,6 +3,7 @@
 
 # SwiftPM / Xcode build output
 .build/
+.agy/transcripts/
 build/
 DerivedData/
 *.xcodeproj/xcuserdata/
