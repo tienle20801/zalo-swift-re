@@ -80,7 +80,7 @@ struct SharedMediaBrowser: View {
                     ForEach(listing.months) { month in
                         VStack(alignment: .leading, spacing: 6) {
                             monthTitle(month.title)
-                            photoGrid(month)
+                            photoGrid(month, gallery: listing.items)
                         }
                         .padding(.top, month.id == listing.months.first?.id ? 0 : 16)
                     }
@@ -100,12 +100,12 @@ struct SharedMediaBrowser: View {
             .accessibilityAddTraits(.isHeader)
     }
 
-    private func photoGrid(_ month: SharedMediaList.Month) -> some View {
+    private func photoGrid(_ month: SharedMediaList.Month, gallery: [ChatMessage]) -> some View {
         let layout = SharedMediaGrid.layout(width: SharedMediaGrid.contentWidth(outer: outerWidth, inset: 16))
         return LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.side), spacing: SharedMediaGrid.gap), count: layout.columns),
                          spacing: SharedMediaGrid.gap) {
             ForEach(month.items) { message in
-                SharedMediaTile(message: message, conversationId: conversationId, side: layout.side)
+                SharedMediaTile(message: message, conversationId: conversationId, side: layout.side, gallery: gallery)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

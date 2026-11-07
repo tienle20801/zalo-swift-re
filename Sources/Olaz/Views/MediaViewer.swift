@@ -2,12 +2,14 @@ import SwiftUI
 import AppKit
 
 /// What the media viewer shows: a chat photo (loaded through `RemoteImage`, official resolver fallback and E2EE included)
-/// or a video that is already on disk, plus who sent it and when (for the top bar and the window title).
+/// or a video (already on disk or resolved on demand when browsing the gallery), plus who sent it and when.
 struct MediaViewerItem: Identifiable, Equatable {
     enum Media: Equatable {
         case photo(url: URL?, width: Int, height: Int, encrypted: Bool)
         /// `size` is the display size when known; it only sizes the window.
         case video(file: URL, size: CGSize?)
+        /// A video in a gallery whose playable file will be resolved on demand when navigated to.
+        case remoteVideo(url: URL?, thumbnail: URL?, duration: Int, encrypted: Bool)
     }
 
     let id = UUID()
@@ -24,6 +26,8 @@ struct MediaViewerItem: Identifiable, Equatable {
             width > 0 && height > 0 ? CGSize(width: width, height: height) : nil
         case .video(_, let size):
             size
+        case .remoteVideo:
+            nil
         }
     }
 
@@ -35,6 +39,44 @@ struct MediaViewerItem: Identifiable, Equatable {
     /// Window title (Window menu, VoiceOver): the sender, or the kind of media when the sender is unknown.
     var windowTitle: String {
         senderName.isEmpty ? (isPhoto ? "Ảnh" : "Video") : senderName
+    }
+
+    static func from(message: ChatMessage, conversationId: String) -> MediaViewerItem? {
+        guard SharedMediaList.qualifies(message, .images) else { return nil }
+        let sender = message.isMine ? "Bạn" : message.senderName
+        switch message.kind {
+        case .photo(let url, let width, let height):
+            guard url != nil else { return nil }
+            let encrypted = message.isE2EE || url?.query?.contains("e2esession") == true
+            return MediaViewerItem(
+                media: .photo(url: url, width: width, height: height, encrypted: encrypted),
+                conversationId: conversationId,
+                messageId: message.id,
+                senderName: sender,
+                date: message.date
+            )
+        case .video(let thumbnail, let duration, let url):
+            guard url != nil else { return nil }
+            let encrypted = message.isE2EE || url?.query?.contains("e2esession") == true
+            return MediaViewerItem(
+                media: .remoteVideo(url: url, thumbnail: thumbnail, duration: duration, encrypted: encrypted),
+                conversationId: conversationId,
+                messageId: message.id,
+                senderName: sender,
+                date: message.date
+            )
+        default:
+            return nil
+        }
+    }
+
+    static func gallery(from messages: [ChatMessage], conversationId: String, current: MediaViewerItem) -> (items: [MediaViewerItem], index: Int) {
+        var list = messages.compactMap { Self.from(message: $0, conversationId: conversationId) }
+        if let idx = list.firstIndex(where: { $0.messageId == current.messageId }) {
+            list[idx] = current
+            return (list, idx)
+        }
+        return ([current], 0)
     }
 }
 
@@ -95,33 +137,134 @@ struct ViewerTitlebar: Equatable {
     var centerY: CGFloat = 22
 }
 
-/// What the viewer window currently shows. One instance lives as long as the app; `present` swaps the item.
+/// What the viewer window currently shows. One instance lives as long as the app; `present` swaps the item or gallery.
 @MainActor
 @Observable
 final class MediaViewerState {
+    private(set) var items: [MediaViewerItem] = []
+    private(set) var currentIndex: Int = 0
     private(set) var item: MediaViewerItem?
     private(set) var zoom = ZoomController()
     private(set) var playback: VideoPlayback?
+    private(set) var isLoadingVideo = false
+    private(set) var videoLoadFailed = false
     var isFullScreen = false
     var titlebar = ViewerTitlebar()
+    @ObservationIgnored private var videoResolveTask: Task<Void, Never>?
+    @ObservationIgnored weak var engine: ZaloEngine?
 
-    func present(_ item: MediaViewerItem) {
-        clear()
-        self.item = item
+    var hasMultipleItems: Bool { items.count > 1 }
+    var canGoPrevious: Bool { currentIndex > 0 }
+    var canGoNext: Bool { currentIndex + 1 < items.count }
+    var positionText: String? {
+        items.count > 1 ? "\(currentIndex + 1) / \(items.count)" : nil
+    }
+
+    func present(_ item: MediaViewerItem, gallery: [MediaViewerItem] = [], index: Int = 0, engine: ZaloEngine? = nil) {
+        self.engine = engine
+        if gallery.isEmpty {
+            self.items = [item]
+            self.currentIndex = 0
+        } else {
+            self.items = gallery
+            self.currentIndex = min(max(index, 0), gallery.count - 1)
+        }
+        activateCurrentItem(forceRetry: false)
+    }
+
+    @discardableResult
+    func goPrevious() -> Bool {
+        guard canGoPrevious else { return false }
+        currentIndex -= 1
+        activateCurrentItem(forceRetry: false)
+        return true
+    }
+
+    @discardableResult
+    func goNext() -> Bool {
+        guard canGoNext else { return false }
+        currentIndex += 1
+        activateCurrentItem(forceRetry: false)
+        return true
+    }
+
+    func retryCurrentVideo() {
+        activateCurrentItem(forceRetry: true)
+    }
+
+    private func activateCurrentItem(forceRetry: Bool) {
+        videoResolveTask?.cancel()
+        videoResolveTask = nil
+        playback?.stop()
+        playback = nil
+        isLoadingVideo = false
+        videoLoadFailed = false
+        guard items.indices.contains(currentIndex) else {
+            item = nil
+            return
+        }
+        let current = items[currentIndex]
+        self.item = current
         zoom = ZoomController()
-        if case .video(let file, _) = item.media { playback = VideoPlayback(url: file) }
+        switch current.media {
+        case .photo:
+            break
+        case .video(let file, _):
+            playback = VideoPlayback(url: file)
+        case .remoteVideo(let url, _, _, let encrypted):
+            guard let url, let engine else {
+                videoLoadFailed = true
+                return
+            }
+            isLoadingVideo = true
+            let targetIndex = currentIndex
+            let messageId = current.messageId
+            let conversationId = current.conversationId
+            videoResolveTask = Task { [weak self] in
+                do {
+                    let playable = try await VideoThumb.resolvePlayableVideo(
+                        url: url, encrypted: encrypted,
+                        conversationId: conversationId, messageId: messageId,
+                        retry: forceRetry, engine: engine
+                    )
+                    try Task.checkCancellation()
+                    let natural = await VideoPlayback.naturalSize(of: playable)
+                    try Task.checkCancellation()
+                    guard let self, self.currentIndex == targetIndex,
+                          self.items.indices.contains(targetIndex),
+                          self.items[targetIndex].messageId == messageId else { return }
+                    self.isLoadingVideo = false
+                    self.items[targetIndex].media = .video(file: playable, size: natural)
+                    self.item = self.items[targetIndex]
+                    self.playback = VideoPlayback(url: playable)
+                } catch {
+                    guard let self, self.currentIndex == targetIndex else { return }
+                    if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                        return
+                    }
+                    self.isLoadingVideo = false
+                    self.videoLoadFailed = true
+                }
+            }
+        }
     }
 
     /// Stops the player and lets go of the item (so the full-resolution image and the video are freed).
     func clear() {
+        videoResolveTask?.cancel()
+        videoResolveTask = nil
         playback?.stop()
         playback = nil
+        isLoadingVideo = false
+        videoLoadFailed = false
+        items = []
+        currentIndex = 0
         item = nil
     }
 }
 
 /// Quick Look-style viewer for chat photos and videos: one big reusable window that resizes to the media, with zoom for
-/// photos and a full player (scrubber, volume) for videos.
+/// photos, a full player (scrubber, volume) for videos, and left/right gallery navigation across the conversation.
 ///
 /// Privacy: hidden (PIN-locked) chats exist, so the viewer closes itself the moment its conversation is locked, the
 /// hidden-chat state is unknown, or the account signs out (see `MediaViewerContent`).
@@ -129,16 +272,19 @@ final class MediaViewerState {
 final class MediaViewer: NSObject, NSWindowDelegate {
     static let shared = MediaViewer()
 
-    private let state = MediaViewerState()
+    internal let state = MediaViewerState()
     private var window: MediaViewerWindow?
     private var hosting: NSHostingView<AnyView>?
     private var keyMonitor: Any?
     /// A swap that happened in full screen: the frame to take when leaving it.
     private var pendingFrame: NSRect?
 
-    func show(_ item: MediaViewerItem, engine: ZaloEngine, shell: ShellModel) {
+    func show(_ item: MediaViewerItem, gallery: [ChatMessage]? = nil, engine: ZaloEngine, shell: ShellModel) {
         // Privacy: a locked hidden chat must never get as far as ordering the window front, not even for a frame.
         guard !MediaViewer.mustClose(conversationId: item.conversationId, engine: engine) else { return }
+        let sourceMessages = gallery ?? (engine.messages[item.conversationId] ?? [])
+        let resolvedGallery = MediaViewerItem.gallery(from: sourceMessages, conversationId: item.conversationId, current: item)
+
         let screen = (window?.isVisible == true ? window?.screen : nil) ?? NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main
         let available = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let content = MediaViewerLayout.contentSize(media: item.mediaSize, available: available.size,
@@ -148,7 +294,7 @@ final class MediaViewer: NSObject, NSWindowDelegate {
 
         let window = self.window ?? makeWindow(size: content)
         hosting?.rootView = AnyView(MediaViewerRoot(state: state, engine: engine, shell: shell))
-        state.present(item)
+        state.present(item, gallery: resolvedGallery.items, index: resolvedGallery.index, engine: engine)
         window.title = item.windowTitle
 
         if window.styleMask.contains(.fullScreen) {
@@ -162,6 +308,20 @@ final class MediaViewer: NSObject, NSWindowDelegate {
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
         updateTitlebar()
+    }
+
+    @discardableResult
+    func goPrevious() -> Bool {
+        guard state.goPrevious(), let current = state.item else { return false }
+        window?.title = current.windowTitle
+        return true
+    }
+
+    @discardableResult
+    func goNext() -> Bool {
+        guard state.goNext(), let current = state.item else { return false }
+        window?.title = current.windowTitle
+        return true
     }
 
     func close() {
@@ -259,28 +419,62 @@ final class MediaViewer: NSObject, NSWindowDelegate {
     }
 
     /// True when the key was ours.
-    private func handle(_ event: NSEvent) -> Bool {
-        guard let item = state.item else { return false }
+    internal func handle(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        return handleKey(keyCode: event.keyCode, characters: key, modifiers: flags, isRepeat: event.isARepeat)
+    }
+
+    internal func handleKey(keyCode: UInt16, characters key: String, modifiers flags: NSEvent.ModifierFlags, isRepeat: Bool = false) -> Bool {
+        guard let item = state.item else { return false }
         if flags.isEmpty {
-            if event.keyCode == 53 { escape(); return true }
+            if keyCode == 53 { escape(); return true }
             if key == "f" {
-                if !event.isARepeat { toggleFullScreen() }
+                if !isRepeat { toggleFullScreen() }
                 return true
             }
+            // Left / Right arrows navigate between gallery items when multiple items exist;
+            // only fall back to ±5s video seek when viewing a single standalone video.
+            if keyCode == 123 {
+                if state.hasMultipleItems {
+                    _ = goPrevious()
+                    return true
+                } else if let playback = state.playback {
+                    playback.skip(by: -5)
+                    return true
+                }
+                return false
+            }
+            if keyCode == 124 {
+                if state.hasMultipleItems {
+                    _ = goNext()
+                    return true
+                } else if let playback = state.playback {
+                    playback.skip(by: 5)
+                    return true
+                }
+                return false
+            }
             guard let playback = state.playback else { return false }
-            switch event.keyCode {
-            case 49: if !event.isARepeat { playback.togglePlay() }
-            case 123: playback.skip(by: -5)
-            case 124: playback.skip(by: 5)
+            switch keyCode {
+            case 49: if !isRepeat { playback.togglePlay() }
             case 126: playback.adjustVolume(by: 0.1)
             case 125: playback.adjustVolume(by: -0.1)
             default:
+                if key == "j" { playback.skip(by: -5); return true }
+                if key == "l" { playback.skip(by: 5); return true }
                 guard key == "m" else { return false }
-                if !event.isARepeat { playback.toggleMute() }
+                if !isRepeat { playback.toggleMute() }
             }
             return true
+        }
+        // Option+Arrow or Shift+Arrow skips video by ±5s even inside a multi-item gallery.
+        if flags == [.option] || flags == [.shift], let playback = state.playback {
+            switch keyCode {
+            case 123: playback.skip(by: -5); return true
+            case 124: playback.skip(by: 5); return true
+            default: break
+            }
         }
         // Preview's zoom shortcuts (⌘+ comes as ⌘⇧= on most layouts).
         guard item.isPhoto, flags.contains(.command), flags.isSubset(of: [.command, .shift]) else { return false }
@@ -339,6 +533,9 @@ private struct MediaViewerContent: View {
     var body: some View {
         ZStack(alignment: .top) {
             media
+            if state.hasMultipleItems {
+                navigationButtons
+            }
             WindowDragArea().frame(height: 36)
             topBar
         }
@@ -370,15 +567,91 @@ private struct MediaViewerContent: View {
                     MediaViewer.shared.toggleFullScreen()
                 })
             }
+        case .remoteVideo(_, let thumbnail, _, _):
+            ZStack {
+                if let thumbnail {
+                    RemoteImage(url: thumbnail, contentMode: .fit, maxPixelSize: 1600) {
+                        Color.clear
+                    }
+                    .resolvingWith { force in
+                        await engine.resolveMedia(conversationId: item.conversationId, messageId: item.messageId, kind: .videoThumb, force: force)
+                    }
+                    .opacity(0.45)
+                }
+                if state.videoLoadFailed {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.orange)
+                        Text(VideoPlayback.failureMessage)
+                            .font(.system(size: 13, weight: .medium))
+                        Button("Thử lại") { state.retryCurrentVideo() }
+                            .buttonStyle(.glassProminent)
+                    }
+                    .padding(20)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                        .padding(20)
+                        .background(.regularMaterial, in: Circle())
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    // MARK: Gallery Navigation
+
+    private var navigationButtons: some View {
+        HStack {
+            navButton(symbol: "chevron.left", label: "Ảnh/video trước (←)", enabled: state.canGoPrevious) {
+                MediaViewer.shared.goPrevious()
+            }
+            Spacer(minLength: 0)
+            navButton(symbol: "chevron.right", label: "Ảnh/video tiếp theo (→)", enabled: state.canGoNext) {
+                MediaViewer.shared.goNext()
+            }
+        }
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .opacity(barsVisible ? 1 : 0)
+        .allowsHitTesting(barsVisible)
+        .animation(.easeOut(duration: 0.2), value: barsVisible)
+    }
+
+    private func navButton(symbol: String, label: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            CenteredSymbol(symbol, size: 16, weight: .semibold, box: 24)
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: Circle())
+        .help(label)
+        .accessibilityLabel(label)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0)
+        .allowsHitTesting(enabled)
+        .onHover { state.playback?.setPointerOver(symbol, $0) }
     }
 
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: 10) {
             info
                 .onHover { state.playback?.setPointerOver("top", $0) }
+            if let position = state.positionText {
+                Text(position)
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .glassEffect(.regular, in: Capsule())
+                    .onHover { state.playback?.setPointerOver("pos", $0) }
+            }
             Spacer(minLength: 12)
             if item.isPhoto { ZoomControls(zoom: state.zoom) }
         }

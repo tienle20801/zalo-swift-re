@@ -101,7 +101,7 @@ struct LoginView: View {
                     .shadow(color: .black.opacity(0.12), radius: 14, y: 6)
                 if let png = state.qrPNG, let image = NSImage(data: png) {
                     Image(nsImage: image)
-                        .interpolation(.none)
+                        .interpolation(image.size.width > 512 ? .high : .none)
                         .resizable()
                         .scaledToFit()
                         .padding(16)

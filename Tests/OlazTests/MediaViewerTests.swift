@@ -379,4 +379,81 @@ import AppKit
             next.stop()
         }
     }
+
+    // MARK: Gallery Navigation
+
+    @Test func galleryBuildsPhotosAndVideosFromMessagesAndPlacesCurrentItem() {
+        let d1 = Date(timeIntervalSince1970: 100)
+        let d2 = Date(timeIntervalSince1970: 200)
+        let d3 = Date(timeIntervalSince1970: 300)
+        let messages: [ChatMessage] = [
+            ChatMessage(id: "m1", conversationId: "c1", senderId: "u1", senderName: "An", isMine: false,
+                        kind: .photo(url: URL(string: "https://example.com/1.jpg"), width: 800, height: 600),
+                        text: "", date: d1, status: .delivered, reactions: [], isE2EE: false),
+            ChatMessage(id: "m_txt", conversationId: "c1", senderId: "u1", senderName: "An", isMine: false,
+                        kind: .text, text: "Hello", date: d1, status: .delivered, reactions: [], isE2EE: false),
+            ChatMessage(id: "m2", conversationId: "c1", senderId: "u2", senderName: "Bạn", isMine: true,
+                        kind: .video(thumbnail: URL(string: "https://example.com/2.jpg"), duration: 15, url: URL(string: "https://example.com/2.mp4")),
+                        text: "", date: d2, status: .delivered, reactions: [], isE2EE: false),
+            ChatMessage(id: "m3", conversationId: "c1", senderId: "u1", senderName: "An", isMine: false,
+                        kind: .photo(url: URL(string: "https://example.com/3.jpg"), width: 1200, height: 900),
+                        text: "", date: d3, status: .delivered, reactions: [], isE2EE: false),
+        ]
+        let current = MediaViewerItem(media: .video(file: URL(fileURLWithPath: "/tmp/resolved.mp4"), size: CGSize(width: 640, height: 360)),
+                                      conversationId: "c1", messageId: "m2", senderName: "Bạn", date: d2)
+        let gallery = MediaViewerItem.gallery(from: messages, conversationId: "c1", current: current)
+        #expect(gallery.items.count == 3)
+        #expect(gallery.index == 1)
+        #expect(gallery.items[0].messageId == "m1" && gallery.items[0].isPhoto)
+        // Current item keeps its resolved .video media rather than being overwritten by .remoteVideo
+        #expect(gallery.items[1].messageId == "m2" && gallery.items[1] == current)
+        #expect(gallery.items[2].messageId == "m3" && gallery.items[2].isPhoto)
+    }
+
+    @Test @MainActor func stateNavigatesPreviousAndNextAcrossGalleryItems() {
+        let date = Date(timeIntervalSince1970: 100)
+        let item1 = MediaViewerItem(media: .photo(url: URL(string: "https://example.com/1.jpg"), width: 100, height: 100, encrypted: false),
+                                    conversationId: "c1", messageId: "m1", senderName: "An", date: date)
+        let item2 = MediaViewerItem(media: .photo(url: URL(string: "https://example.com/2.jpg"), width: 200, height: 100, encrypted: false),
+                                    conversationId: "c1", messageId: "m2", senderName: "Bình", date: date)
+        let item3 = MediaViewerItem(media: .photo(url: URL(string: "https://example.com/3.jpg"), width: 300, height: 100, encrypted: false),
+                                    conversationId: "c1", messageId: "m3", senderName: "Chi", date: date)
+        let state = MediaViewerState()
+        state.present(item2, gallery: [item1, item2, item3], index: 1)
+        #expect(state.hasMultipleItems && state.canGoPrevious && state.canGoNext)
+        #expect(state.positionText == "2 / 3" && state.item?.messageId == "m2")
+
+        #expect(state.goPrevious())
+        #expect(state.currentIndex == 0 && state.item?.messageId == "m1")
+        #expect(!state.canGoPrevious && state.canGoNext && state.positionText == "1 / 3")
+        #expect(!state.goPrevious()) // clamped at start
+
+        #expect(state.goNext())
+        #expect(state.goNext())
+        #expect(state.currentIndex == 2 && state.item?.messageId == "m3")
+        #expect(state.canGoPrevious && !state.canGoNext && state.positionText == "3 / 3")
+        #expect(!state.goNext()) // clamped at end
+    }
+
+    @Test @MainActor func centeredSymbolsAreSymmetricallyAlignedInTheirBox() throws {
+        // Symmetric and badge/slash symbols must have equal left/right and top/bottom pixel margins (within 1px for odd pixel counts).
+        let symmetricSymbols = [
+            "pause.fill", "arrow.up.left.and.arrow.down.right", "arrow.down.right.and.arrow.up.left",
+            "minus.magnifyingglass", "plus.magnifyingglass", "1.magnifyingglass",
+            "bell", "bell.slash", "pin", "pin.slash", "person.2.badge.plus", "ellipsis", "plus", "xmark"
+        ]
+        for symbol in symmetricSymbols {
+            let m = try #require(CenteredSymbol.pixelMargins(symbol: symbol, pointSize: 13, weight: .semibold, box: 28))
+            #expect(abs(m.left - m.right) <= 1, "Horizontal asymmetry on \(symbol): L=\(m.left) R=\(m.right)")
+            #expect(abs(m.top - m.bottom) <= 1, "Vertical asymmetry on \(symbol): T=\(m.top) B=\(m.bottom)")
+        }
+
+        // Circular arrow icons (gobackward.5, goforward.5, arrow.counterclockwise) are horizontally symmetric
+        // and shifted slightly upward so their circular ring and inner digit sit concentric with the button.
+        for symbol in ["gobackward.5", "goforward.5", "arrow.counterclockwise"] {
+            let m = try #require(CenteredSymbol.pixelMargins(symbol: symbol, pointSize: 13, weight: .semibold, box: 28))
+            #expect(abs(m.left - m.right) <= 1, "Horizontal asymmetry on \(symbol): L=\(m.left) R=\(m.right)")
+            #expect(m.top <= m.bottom && m.bottom - m.top <= 3, "Ring optical centering on \(symbol): T=\(m.top) B=\(m.bottom)")
+        }
+    }
 }

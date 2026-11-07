@@ -486,7 +486,9 @@ struct VideoPlayerView: View {
     private var controlBar: some View {
         GlassEffectContainer(spacing: 10) {
             HStack(spacing: 10) {
+                ViewerIconButton(symbol: "gobackward.5", label: "Tua lùi 5 giây", help: "Tua lùi 5 giây (⌥← / J)") { playback.skip(by: -5) }
                 ViewerIconButton(symbol: playSymbol, label: playLabel, help: playLabel + (playback.ended ? "" : " (Dấu cách)")) { playback.togglePlay() }
+                ViewerIconButton(symbol: "goforward.5", label: "Tua tới 5 giây", help: "Tua tới 5 giây (⌥→ / L)") { playback.skip(by: 5) }
                 scrubber
                 volumeControl
                 if let fullScreen {
@@ -496,7 +498,7 @@ struct VideoPlayerView: View {
                 }
             }
         }
-        .frame(maxWidth: 620)
+        .frame(maxWidth: 680)
         .padding(.horizontal, 16)
         .padding(.bottom, 24)
         .onHover { playback.setPointerOver("bar", $0) }
@@ -543,11 +545,8 @@ struct VideoPlayerView: View {
     private var volumeControl: some View {
         HStack(spacing: 6) {
             Button { playback.toggleMute() } label: {
-                Image(systemName: playback.volumeSymbol)
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 22, height: 22)
+                CenteredSymbol(playback.volumeSymbol, size: 13, weight: .semibold, box: 22)
                     .contentShape(Rectangle())
-                    .contentTransition(.symbolEffect(.replace))
             }
             .buttonStyle(.plain)
             .help((playback.displayedVolume == 0 ? "Bật tiếng" : "Tắt tiếng") + " (M)")

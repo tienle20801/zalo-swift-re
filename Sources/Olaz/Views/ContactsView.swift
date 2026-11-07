@@ -142,7 +142,7 @@ struct ContactActionButton: View {
     }
 
     @ViewBuilder private var button: some View {
-        let label = Image(systemName: symbol).font(.system(size: 17, weight: .semibold)).frame(width: 24, height: 24)
+        let label = CenteredSymbol(symbol, size: 17, weight: .semibold, box: 24)
         if prominent {
             Button(action: action) { label }.buttonStyle(.glassProminent)
         } else {

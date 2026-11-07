@@ -364,10 +364,7 @@ struct ViewerIconButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 13, weight: .semibold))
-                .frame(width: 20, height: 20)
-                .contentTransition(.symbolEffect(.replace))
+            CenteredSymbol(symbol, size: 13, weight: .semibold, box: 20)
         }
         .buttonStyle(.glass)
         .buttonBorderShape(.circle)

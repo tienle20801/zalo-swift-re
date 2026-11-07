@@ -853,14 +853,22 @@
 
   // ---- state publishing ----
   const track = { id: null, lastMessages: null, lastList: null, sigs: new Map(), exhausted: false, lastHasMore: null, noGrowth: 0, nameRetries: 0, needsNames: false };
-  let dirty = false, timer = null, forceReset = false;
+  let dirty = false, timer = null, timerDue = 0, timerSeq = 0, forceReset = false;
   let openSeq = 0, openingId = null;
   const hasMoreOf = (conv) => {
     if (track.exhausted) return false;
     const ml = conv.msgList || {};
     return ml.hasMoreLocal !== false || (ml.hasMoreCloud !== false && ml.hasMoreCloud !== 0 && ml.hasMoreCloud !== undefined);
   };
-  const schedule = () => { if (!track.id || timer) return; timer = setTimeout(() => { timer = null; flush(); }, 150); };
+  const schedule = (ms) => {
+    if (!track.id) return;
+    const delay = typeof ms === 'number' ? ms : 60, due = Date.now() + delay;
+    if (timer && timerDue <= due) return;
+    if (timer) clearTimeout(timer);
+    timerDue = due;
+    const seq = ++timerSeq;
+    timer = setTimeout(() => { if (seq !== timerSeq) return; timer = null; timerDue = 0; flush(); }, delay);
+  };
   const flush = () => {
     const id = track.id;
     if (!id) return;
@@ -907,10 +915,16 @@
   const subscribe = () => {
     if (subscribed || !store()) return;
     subscribed = true;
-    store().subscribe(() => { if (track.id) schedule(); });
+    store().subscribe(() => {
+      if (!track.id) return;
+      const conv = convOf(track.id);
+      const msgs = conv && conv.messages;
+      const fast = Array.isArray(msgs) && (!track.lastMessages || msgs.length !== track.lastMessages.length || msgs[msgs.length - 1] !== track.lastMessages[track.lastMessages.length - 1]);
+      schedule(fast ? 25 : 75);
+    });
     // Names/avatars can arrive after messages: re-check only while some are missing, a bounded number of times.
     setInterval(() => {
-      if (track.id && track.needsNames && track.nameRetries < 10) { track.nameRetries++; dirty = true; schedule(); }
+      if (track.id && track.needsNames && track.nameRetries < 10) { track.nameRetries++; dirty = true; schedule(100); }
     }, 2500);
   };
 
@@ -993,13 +1007,13 @@
       }
       const list = isGroupId(convId) ? cleanMentions(mentions, String(text)) : [];
       await cc._processSendMessage(MSG.TEXT, String(text), list, quoted, true, info, true, null, null);
-      await sleep(50);
+      await sleep(25);
     } catch (e) {
       diag('send failed: ' + scrubErr(e));
       return 'error';
     } finally {
       if (quoteMsgId && !direct) safe(() => cc._quoteBannerData._clear(), null);
-      dirty = true; schedule();
+      dirty = true; schedule(16);
     }
     return 'sent';
   };
@@ -1010,7 +1024,7 @@
     sendChain = run.catch(() => {});
     return run;
   };
-  const refresh = () => { dirty = true; schedule(); };
+  const refresh = () => { dirty = true; schedule(25); };
 
   // Official ZTagNameHelper registry (found once in the module cache); SRC_GET_PROFILE comes from `scanModules`.
   let tagRegistry = null;
@@ -1214,7 +1228,7 @@
       track.id = convId; track.exhausted = false; track.noGrowth = 0; track.nameRetries = 0; track.needsNames = false;
       track.lastMessages = null; track.lastList = null; track.sigs = new Map();
       forceReset = true; dirty = true;
-      schedule();
+      schedule(16);
       try {
         const cc = controller();
         if (!cc || cc.convId !== convId || switched) await S.opener.openConversation(convId);
@@ -1228,7 +1242,7 @@
         // The chat view marks its loader active so the official in-memory message cache follows the conversation.
         safe(() => S.loader.cacheMessageLoader.get(convId).active(), null);
       } catch (e) { diag('open ' + (e && e.message || e)); }
-      if (!stale()) { openingId = null; dirty = true; schedule(); }
+      if (!stale()) { openingId = null; dirty = true; schedule(16); }
     },
     async close(convId) {
       convId = String(convId);

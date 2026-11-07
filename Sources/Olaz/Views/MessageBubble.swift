@@ -706,6 +706,8 @@ struct PhotoView: View {
     var encrypted = false
     /// Square thumbnail of this side (the inspector's media grid) instead of the chat size.
     var tile: CGFloat?
+    /// Explicit gallery order (e.g. from the inspector / storage browser grid); nil uses the chat's loaded messages.
+    var gallery: [ChatMessage]?
     @Environment(ZaloEngine.self) private var engine
     @Environment(ShellModel.self) private var shell
 
@@ -740,7 +742,7 @@ struct PhotoView: View {
         MediaViewer.shared.show(
             MediaViewerItem(media: .photo(url: url, width: width, height: height, encrypted: encrypted),
                             conversationId: conversationId, messageId: messageId, senderName: senderName, date: date),
-            engine: engine, shell: shell)
+            gallery: gallery, engine: engine, shell: shell)
     }
 }
 
@@ -757,6 +759,8 @@ struct VideoThumb: View {
     var encrypted = false
     /// Square thumbnail of this side (the inspector's media grid) instead of the chat size.
     var tile: CGFloat?
+    /// Explicit gallery order (e.g. from the inspector / storage browser grid); nil uses the chat's loaded messages.
+    var gallery: [ChatMessage]?
     @Environment(ZaloEngine.self) private var engine
     @Environment(ShellModel.self) private var shell
 
@@ -817,7 +821,11 @@ struct VideoThumb: View {
         phase = .loading
         loadTask = Task {
             do {
-                let playable = try await playableFile(url, retry: retry)
+                let playable = try await Self.resolvePlayableVideo(
+                    url: url, encrypted: encrypted,
+                    conversationId: conversationId, messageId: messageId,
+                    retry: retry, engine: engine
+                )
                 try Task.checkCancellation()
                 // The video's shape sizes the viewer window.
                 let natural = await VideoPlayback.naturalSize(of: playable)
@@ -826,7 +834,7 @@ struct VideoThumb: View {
                 MediaViewer.shared.show(
                     MediaViewerItem(media: .video(file: playable, size: natural), conversationId: conversationId,
                                     messageId: messageId, senderName: senderName, date: date),
-                    engine: engine, shell: shell)
+                    gallery: gallery, engine: engine, shell: shell)
             } catch {
                 // Scrolling away cancels the task; that surfaces as CancellationError or URLError.cancelled.
                 if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
@@ -841,7 +849,14 @@ struct VideoThumb: View {
     /// The official player plays every video from the copy `downloadWithMultiSrc` saves (`resolveMedia` kind `.video`), which
     /// decrypts an E2EE video and falls back to Zalo Cloud. Other videos come straight from the CDN first (no wait behind the
     /// photo resolver's queue) and go the official way only when that fails or does not yield a video file.
-    private func playableFile(_ url: URL, retry: Bool) async throws -> URL {
+    internal static func resolvePlayableVideo(
+        url: URL,
+        encrypted: Bool,
+        conversationId: String,
+        messageId: String,
+        retry: Bool,
+        engine: ZaloEngine
+    ) async throws -> URL {
         if !encrypted {
             do {
                 let file = try await MediaLoader.shared.localFile(for: url)

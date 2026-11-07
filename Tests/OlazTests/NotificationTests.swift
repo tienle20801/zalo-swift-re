@@ -145,4 +145,45 @@ import Foundation
         #expect(!NotificationPolicy.isSoundURLAllowed(URL(string: "https://evil.example.com/sound/noti.mp3")!))
         #expect(!NotificationPolicy.isSoundURLAllowed(URL(string: "https://stc-chat.zdn.vn/other.mp3")!))
     }
+
+    @MainActor @Test func markReadAndReplyRefusalPolicy() {
+        #expect(NativeNotifier.markReadAction == "app.olaz.message.markRead")
+        #expect(NotificationPolicy.refusesReply(hiddenStateKnown: false, conversationLocked: false))
+        #expect(NotificationPolicy.refusesReply(hiddenStateKnown: true, conversationLocked: true))
+        #expect(!NotificationPolicy.refusesReply(hiddenStateKnown: true, conversationLocked: false))
+    }
+
+    @MainActor @Test func avatarLRUCacheAndStaleTempFileCleanup() throws {
+        let notifier = NativeNotifier.shared
+        let base = "https://s120-ava-talk.zadn.vn/test-lru-"
+        for i in 0..<(NativeNotifier.maxCachedAvatars + 4) {
+            let url = URL(string: "\(base)\(i).png")!
+            notifier.storeAvatarData(Data([UInt8(i & 0xFF)]), for: url)
+        }
+        // First 4 entries were evicted; accessing entry 4 promotes it in LRU order.
+        #expect(notifier.cachedAvatarData(for: URL(string: "\(base)0.png")!) == nil)
+        let promoted = URL(string: "\(base)4.png")!
+        #expect(notifier.cachedAvatarData(for: promoted) == Data([4]))
+        notifier.storeAvatarData(Data([99]), for: URL(string: "\(base)999.png")!)
+        #expect(notifier.cachedAvatarData(for: promoted) == Data([4]))
+        #expect(notifier.cachedAvatarData(for: URL(string: "\(base)5.png")!) == nil)
+
+        // Temp file cleanup removes only expired files.
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent("OlazNotiTest-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+
+        let oldFile = tempDir.appendingPathComponent("old.png")
+        let freshFile = tempDir.appendingPathComponent("fresh.png")
+        try Data([1, 2, 3]).write(to: oldFile)
+        try Data([4, 5, 6]).write(to: freshFile)
+        let now = Date.now
+        try fm.setAttributes([.modificationDate: now.addingTimeInterval(-600)], ofItemAtPath: oldFile.path)
+        try fm.setAttributes([.modificationDate: now.addingTimeInterval(-10)], ofItemAtPath: freshFile.path)
+
+        NativeNotifier.cleanStaleTempFiles(in: tempDir, maxAge: 300, now: now)
+        #expect(!fm.fileExists(atPath: oldFile.path))
+        #expect(fm.fileExists(atPath: freshFile.path))
+    }
 }

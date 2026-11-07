@@ -45,7 +45,7 @@ struct CloudPreviewSheet: View {
                     .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Button { dismiss() } label: { Image(systemName: "xmark") }
+            Button { dismiss() } label: { CenteredSymbol("xmark", size: 13, weight: .semibold, box: 20) }
                 .buttonStyle(.glass).buttonBorderShape(.circle).keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 18).padding(.vertical, 12)

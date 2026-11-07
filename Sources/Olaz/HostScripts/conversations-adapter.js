@@ -116,8 +116,31 @@
     return Array.isArray(out) ? out : null;
   };
 
+  let pending = null, pendingDue = 0, pendingSeq = 0, hooked = false;
+  const schedule = (ms) => {
+    const delay = typeof ms === 'number' ? ms : 80, due = Date.now() + delay;
+    if (pending && pendingDue <= due) return;
+    if (pending) clearTimeout(pending);
+    pendingDue = due;
+    const seq = ++pendingSeq;
+    pending = setTimeout(() => { if (seq !== pendingSeq) return; pending = null; pendingDue = 0; publish(false); }, delay);
+  };
+  const hookEvents = () => {
+    if (hooked || !S.ctrl) return;
+    hooked = true;
+    const c = S.ctrl;
+    const on = (mgr, names, ms) => {
+      if (!mgr || typeof mgr.addEventListener !== 'function') return;
+      for (const n of names) safe(() => mgr.addEventListener(n, () => schedule(ms)), null);
+    };
+    on(c.unreadDataManager, ['ChangeUnreadCount', 'ReadConv'], 60);
+    on(c.previewDataManager, ['PreviewChanged'], 60);
+    on(c.convDataManager, ['AddOrUpdateConv', 'DeleteConv', 'LeaveGroup', 'ChangePinConv'], 80);
+    on(c.labelDataManager, ['UpdateLabel', 'ChangeLabel'], 80);
+  };
   const publish = (force) => {
     if (!resolve()) return;
+    hookEvents();
     let snap;
     try { snap = snapshot(); } catch (e) { diag('snapshot failed: ' + e); return; }
     const key = JSON.stringify(snap);

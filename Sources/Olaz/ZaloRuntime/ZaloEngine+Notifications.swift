@@ -238,8 +238,8 @@ extension ZaloEngine {
                 if status == .notDetermined { status = await NativeNotifier.shared.requestAuthorization() }
                 applyAuthorization(status)
                 callChat("refresh", object: "__zaloNotification")
-                // The page-load handler announces "focus" once the page finishes; restore the real state after it.
-                try? await Task.sleep(for: .seconds(4))
+                NativeNotifier.shared.syncFocusState()
+                try? await Task.sleep(for: .milliseconds(500))
                 NativeNotifier.shared.syncFocusState()
             }
         case "requestPermission":

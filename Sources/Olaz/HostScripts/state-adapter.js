@@ -23,7 +23,7 @@
       jsonp.push([[id], { [id]: (m, e, r) => { window.__zaloRequire = r; } }, [[id]]]);
       return window.__zaloRequire ? cb(window.__zaloRequire) : false;
     };
-    if (tryCapture() === false) { const t = setInterval(() => { if (tryCapture() !== false) clearInterval(t); }, 200); }
+    if (tryCapture() === false) { const t = setInterval(() => { if (tryCapture() !== false) clearInterval(t); }, 50); }
   };
   // Calls `visit(exportValue, moduleId)` for every loaded module export.
   const eachExport = (req, visit) => {
@@ -228,9 +228,32 @@
           const text = safe(() => previewText(p), '') || '';
           return { text: String(text).slice(0, 200), ts: Number(p.messageTime || p.sendDttm || p.ts || 0), fromMe: !!p.isMe || String(p.fromUid) === '0', type: p.messageType || p.msgType || '' };
         };
+        let pending = null, pendingDue = 0, pendingSeq = 0, hooked = false;
+        const schedule = (ms) => {
+          const delay = typeof ms === 'number' ? ms : 80, due = Date.now() + delay;
+          if (pending && pendingDue <= due) return;
+          if (pending) clearTimeout(pending);
+          pendingDue = due;
+          const seq = ++pendingSeq;
+          pending = setTimeout(() => { if (seq !== pendingSeq) return; pending = null; pendingDue = 0; publish().catch((e) => diag('conversations publish failed: ' + e)); }, delay);
+        };
+        const hookEvents = (m) => {
+          if (hooked || !m) return;
+          hooked = true;
+          const on = (mgr, names, ms) => {
+            if (!mgr || typeof mgr.addEventListener !== 'function') return;
+            for (const n of names) safe(() => mgr.addEventListener(n, () => schedule(ms)), null);
+          };
+          on(m.unread, ['ChangeUnreadCount', 'ReadConv'], 60);
+          on(m.preview, ['PreviewChanged'], 60);
+          on(m.convs, ['AddOrUpdateConv', 'DeleteConv', 'LeaveGroup', 'ChangePinConv'], 80);
+          on(m.friends, ['UpdateFriend', 'FriendProfileUpdated'], 200);
+          on(m.groups, ['UpdateGroup', 'GroupProfileUpdated'], 200);
+        };
         const publish = async () => {
           beginTick();
           if (!modules) { modules = await loadModules().catch(() => null); if (!modules || !modules.convs) { modules = null; return; } }
+          hookEvents(modules);
           const m = modules;
           const missing = [];
           const rows = [];
@@ -262,6 +285,12 @@
   }
 
   if (page === 'login.html') {
+    const isRealQR = (src) => {
+      if (typeof src !== 'string' || !src.startsWith('data:image/')) return false;
+      // Reject the 42x42 loading spinner SVG (`Pe` in login.html).
+      if (src.includes('animateTransform') || src.includes('PHN2ZyB3aWR0aD0iNDIi') || src.includes('viewBox="0 0 42 42"') || src.includes('viewBox%3D%220%200%2042%2042%22')) return false;
+      return true;
+    };
     // Wrap the trusted-device QR generators so Swift receives the exact QR the
     // official client shows (first QR, and the second "confirm" QR).
     withRequire((req) => {
@@ -312,7 +341,9 @@
             if (typeof original !== 'function') continue;
             target[name] = async function (...args) {
               const qr = await original.apply(this, args);
-              post({ page: 'login', event: name === 'genFirstQR' ? 'qr' : 'qr2', qr });
+              if (isRealQR(qr)) {
+                post({ page: 'login', event: name === 'genFirstQR' ? 'qr' : 'qr2', qr });
+              }
               return qr;
             };
             target[name].__olaz = true;
@@ -322,34 +353,39 @@
         diag('patch pass: require modules=' + Object.keys(req.c || {}).length + ' factoriesWithGenFirstQR=' + Object.entries(req.m || {}).filter(([, f]) => String(f).includes('async genFirstQR(')).map(([id]) => id + (req.c[id] ? '(loaded)' : '(not loaded)')).join(',') + ' patched=' + patched);
         return patched;
       };
-      // Lazy login chunks may load after the runtime; retry until found.
-      if (!patch()) { const t = setInterval(() => { if (patch()) clearInterval(t); }, 300); setTimeout(() => clearInterval(t), 30000); }
+      // Lazy login chunks may load after the runtime; retry quickly until found.
+      if (!patch()) { const t = setInterval(() => { if (patch()) clearInterval(t); }, 60); setTimeout(() => clearInterval(t), 30000); }
       return true;
     });
     let last = '';
     const snapshot = () => {
       const root = document.querySelector('.login-qr-page') || document.querySelector('#app-page');
       if (!root) return null;
+      const invalid = !!root.querySelector('.qr--invalid, .qr-img-err, .off--qr-code, .mask:not(.mask--none)');
       const imgs = Array.from(root.querySelectorAll('img')).filter((i) => i.src && i.naturalWidth >= 64);
       const qrImg = root.querySelector('.qr-image img, img.qr-image, .login-qr__frame-qr img') || imgs.find((i) => i.src.startsWith('data:image/png') || i.src.startsWith('data:image/svg'));
       const canvas = root.querySelector('.login-qr__frame-qr canvas, .qr-code canvas');
-      let qr = qrImg ? qrImg.src : null;
-      if (!qr && canvas) { try { qr = canvas.toDataURL('image/png'); } catch {} }
-      const invalid = !!root.querySelector('.qr--invalid, .qr-img-err, .off--qr-code');
+      let rawQr = qrImg ? qrImg.src : null;
+      if (!rawQr && canvas) { try { rawQr = canvas.toDataURL('image/png'); } catch {} }
+      // When expired (`invalid`), `.login-qr-page` swaps `img.qr-image` to a dummy static SVG; never report that or the loading spinner as a valid QR.
+      const qr = (!invalid && isRealQR(rawQr)) ? rawQr : null;
       const avatar = Array.from(root.querySelectorAll('img')).find((i) => /ava|avatar/.test(i.className + ' ' + i.src) && i !== qrImg);
+      const waitingAccept = !root.querySelector('.login-qr__frame-qr');
+      const nameEl = waitingAccept ? root.querySelector('.truncate') : null;
+      const displayName = nameEl ? (nameEl.innerText || '').trim() : null;
       const buttons = Array.from(root.querySelectorAll('button, .z--btn--v2')).map((b) => (b.innerText || '').trim()).filter(Boolean);
       const text = (root.innerText || '').trim().replace(/\n{2,}/g, '\n').slice(0, 600);
-      return { page: 'login', qr, invalid, avatar: avatar ? avatar.src : null, text, buttons };
+      return { page: 'login', qr, invalid, avatar: avatar ? avatar.src : null, displayName, text, buttons };
     };
     const tick = () => {
       const s = snapshot();
       if (!s) return;
-      const key = JSON.stringify([s.qr && s.qr.length, s.qr && s.qr.slice(-40), s.invalid, s.avatar, s.text]);
+      const key = JSON.stringify([s.qr && s.qr.length, s.qr && s.qr.slice(-40), s.invalid, s.avatar, s.displayName, s.text]);
       if (key !== last) { last = key; post(s); }
     };
     const start = () => {
       new MutationObserver(tick).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
-      setInterval(tick, 1500);
+      setInterval(tick, 1000);
       tick();
     };
     if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);

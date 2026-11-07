@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Native chat pane for one conversation. All data comes from `ZaloEngine`.
 struct ChatView: View {
@@ -19,6 +20,7 @@ struct ChatView: View {
     @State private var columnWidth: CGFloat = 400
     /// A loaded message to bring on screen (a pin of the pinned bar).
     @State private var jumpTarget: String?
+    @State private var isDropTargeted = false
 
     private enum SendNotice { case restored, like }
 
@@ -55,6 +57,34 @@ struct ChatView: View {
             }
         }
         .background { ChatWallpaperBackground() }
+        .overlay {
+            if isDropTargeted {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(.tint, style: StrokeStyle(lineWidth: 2.5, dash: [8, 5]))
+                        )
+                        .padding(10)
+                    VStack(spacing: 8) {
+                        Image(systemName: "arrow.up.doc.on.clipboard")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.tint)
+                        Text("Thả để gửi ảnh, tệp hoặc thư mục tới \(conversation.displayName)")
+                            .font(.system(size: 13.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
+        }
+        .onDrop(of: [.fileURL, .png, .tiff, .pdf, .image], isTargeted: $isDropTargeted) { providers in
+            engine.handleDroppedProviders(providers, in: id)
+        }
         .safeAreaBar(edge: .top, spacing: 0) {
             PinnedBar(conversationId: id, open: openPin)
         }
@@ -112,6 +142,11 @@ struct ChatView: View {
             focusTick += 1
             restoreFailedDraft()
             markReadIfNeeded(last: loaded?.last, newIncomingOnly: false)
+        }
+        .onChange(of: id) { _, _ in
+            focusTick += 1
+            restoreFailedDraft()
+            markReadIfNeeded(last: engine.messages[id]?.last, newIncomingOnly: false)
         }
         .onChange(of: engine.failedDrafts.revision) { _, _ in restoreFailedDraft() }
         .onChange(of: loaded?.last?.id) { _, _ in markReadIfNeeded(last: engine.messages[id]?.last, newIncomingOnly: true) }
@@ -251,20 +286,28 @@ struct ChatRow: Identifiable {
 }
 
 /// Rebuilds rows only when the message array actually changed.
-private final class RowCache {
+final class RowCache {
     private var source: [ChatMessage] = []
+    private var days: [Date] = []
     private var rows: [ChatRow] = []
 
     func rows(for msgs: [ChatMessage]) -> [ChatRow] {
         if msgs == source { return rows }
+        let cal = ChatFormat.calendar
+        if msgs.count >= source.count, !source.isEmpty,
+           zip(source, msgs.prefix(source.count)).allSatisfy({ $0.id == $1.id && $0.date == $1.date }) {
+            for i in source.count..<msgs.count {
+                days.append(cal.startOfDay(for: msgs[i].date))
+            }
+        } else {
+            days = msgs.map { cal.startOfDay(for: $0.date) }
+        }
         source = msgs
-        rows = Self.build(msgs)
+        rows = Self.build(msgs, days: days)
         return rows
     }
 
-    private static func build(_ msgs: [ChatMessage]) -> [ChatRow] {
-        let cal = ChatFormat.calendar
-        let days = msgs.map { cal.startOfDay(for: $0.date) }
+    private static func build(_ msgs: [ChatMessage], days: [Date]) -> [ChatRow] {
         // Notices / e-cards are not bubbles: they never carry the status line and do not take part in grouping.
         let lastMineId = msgs.last(where: { $0.isMine && !$0.kind.isStandalone })?.id
         func grouped(_ i: Int, _ j: Int) -> Bool {
@@ -420,7 +463,7 @@ private struct MessageList: View {
                     Button {
                         scrollToBottom(proxy)
                     } label: {
-                        Image(systemName: "chevron.down").font(.system(size: 13, weight: .bold))
+                        CenteredSymbol("chevron.down", size: 13, weight: .bold, box: 20)
                     }
                     .buttonStyle(.glass)
                     .buttonBorderShape(.circle)

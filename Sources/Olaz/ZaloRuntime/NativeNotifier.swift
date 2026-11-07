@@ -115,6 +115,7 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     static let messageCategory = "app.olaz.message"
     static let replyAction = "app.olaz.message.reply"
+    static let markReadAction = "app.olaz.message.markRead"
     /// Title of the development renderer window — never the user-facing window.
     private static let debugWindowTitle = "Zalo renderer (debug)"
 
@@ -132,6 +133,40 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
     private var attached = false
     private var orphanDrafts = FailedDraftStore()
     private var knownHidden: Set<String> = []
+    private var avatarCache: [URL: Data] = [:]
+    private var avatarCacheOrder: [URL] = []
+    static let maxCachedAvatars = 64
+
+    func cachedAvatarData(for url: URL) -> Data? {
+        guard let data = avatarCache[url] else { return nil }
+        if let idx = avatarCacheOrder.firstIndex(of: url) {
+            avatarCacheOrder.remove(at: idx)
+            avatarCacheOrder.append(url)
+        }
+        return data
+    }
+
+    func storeAvatarData(_ data: Data, for url: URL) {
+        if avatarCache[url] != nil, let idx = avatarCacheOrder.firstIndex(of: url) {
+            avatarCacheOrder.remove(at: idx)
+        } else if avatarCacheOrder.count >= Self.maxCachedAvatars, let oldest = avatarCacheOrder.first {
+            avatarCacheOrder.removeFirst()
+            avatarCache.removeValue(forKey: oldest)
+        }
+        avatarCache[url] = data
+        avatarCacheOrder.append(url)
+    }
+
+    static func cleanStaleTempFiles(in directory: URL, maxAge: TimeInterval = 300, now: Date = .now) {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return }
+        for url in urls {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if now.timeIntervalSince(modified) >= maxAge {
+                try? fm.removeItem(at: url)
+            }
+        }
+    }
 
     /// `UNUserNotificationCenter.current()` traps outside an app bundle (tests, `swift run`, probe).
     var isAvailable: Bool { Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil }
@@ -215,8 +250,8 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         if let entry = live[id] {
-            // The renderer registers the id when `createNotification` resolves; let that happen first.
-            try? await Task.sleep(for: .milliseconds(60))
+            // The renderer registers the id when `createNotification` resolves; `notification-adapter.js` also buffers earlyEvents.
+            try? await Task.sleep(for: .milliseconds(15))
             push("_noti_on-show", id: id, entry: entry)
         }
     }
@@ -228,14 +263,23 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
         case .inline(let bytes): data = bytes
         case .bundled(let path): data = engine?.host?.install.asar.read("pc-dist/" + path)
         case .remote(let url):
-            data = await Self.withTimeout(seconds: 3) {
-                guard let file = try? await MediaLoader.shared.localFile(for: url) else { return nil }
-                return try? Data(contentsOf: file)
-            } ?? nil
+            if let cached = cachedAvatarData(for: url) {
+                data = cached
+            } else {
+                let fetched: Data? = await Self.withTimeout(seconds: 1.0) {
+                    guard let file = try? await MediaLoader.shared.localFile(for: url) else { return nil }
+                    return try? Data(contentsOf: file)
+                } ?? nil
+                if let fetched, NotificationPolicy.attachmentType(for: fetched) != nil {
+                    storeAvatarData(fetched, for: url)
+                }
+                data = fetched
+            }
         }
         guard let data, let kind = NotificationPolicy.attachmentType(for: data) else { return nil }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("OlazNotifications", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        Self.cleanStaleTempFiles(in: directory)
         let file = directory.appendingPathComponent(UUID().uuidString + "." + kind.ext)
         do {
             try data.write(to: file)
@@ -304,7 +348,9 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
         let reply = UNTextInputNotificationAction(
             identifier: Self.replyAction, title: "Trả lời", options: [],
             textInputButtonTitle: "Gửi", textInputPlaceholder: "Nhập tin nhắn…")
-        let category = UNNotificationCategory(identifier: Self.messageCategory, actions: [reply], intentIdentifiers: [],
+        let markRead = UNNotificationAction(
+            identifier: Self.markReadAction, title: "Đánh dấu đã đọc", options: [])
+        let category = UNNotificationCategory(identifier: Self.messageCategory, actions: [reply, markRead], intentIdentifiers: [],
                                               options: [.hiddenPreviewsShowTitle])
         center?.setNotificationCategories([category])
         center?.delegate = self
@@ -440,6 +486,17 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
                     if let engine { engine.failedDrafts.stash(draft, for: convId) } else { orphanDrafts.stash(draft, for: convId) }
                     // Say so (no content in the banner) unless the conversation is on screen, where its composer shows it.
                     if !(NSApp.isActive && engine?.openConversationId == convId) { await postSendFailure(convId: convId) }
+                }
+            }
+        case Self.markReadAction:
+            if !convId.isEmpty, let engine {
+                let refused = NotificationPolicy.refusesReply(
+                    hiddenStateKnown: engine.conversationActions.hiddenKnown,
+                    conversationLocked: engine.isConversationLocked(convId)
+                )
+                if !refused {
+                    engine.markConversationRead(convId)
+                    clearDelivered(conversation: convId)
                 }
             }
         case UNNotificationDefaultActionIdentifier:

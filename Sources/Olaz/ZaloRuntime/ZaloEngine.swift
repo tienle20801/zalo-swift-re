@@ -65,7 +65,7 @@ final class ZaloEngine {
         var displayName: String { name.isEmpty ? (isGroup ? "Nhóm" : "Người dùng Zalo") : name }
     }
 
-    private(set) var phase: Phase = .starting
+    internal(set) var phase: Phase = .starting
     private(set) var conversations: [ConversationSummary] = []
     private(set) var profile: Profile?
     /// Why the session ended, shown on the login screen (e.g. kicked by another PC login).
@@ -265,6 +265,7 @@ final class ZaloEngine {
 
     /// Fresh QR (the official page regenerates on load).
     func refreshQR() {
+        loginTimeout?.cancel()
         guard let host, let mainProcess else { return }
         phase = .login(LoginState())
         host.load(.login, query: mainProcess.pageQuery())
@@ -334,13 +335,7 @@ final class ZaloEngine {
         EngineLog.shared.write("state page=\(state["page"] ?? "-") event=\(state["event"] ?? "-") keys=\(state.keys.sorted())")
         switch state["page"] as? String {
         case "login":
-            guard case .login(var login) = phase else { return }
-            if let qr = state["qr"] as? String, let png = Self.decodeDataURL(qr) {
-                login.qrPNG = png
-                if state["event"] as? String == "qr" { login.step = .waitingScan }
-                phase = .login(login)
-                scheduleExpiry()
-            }
+            applyLoginState(state)
         case "main" where state["convActions"] != nil:
             handleConversationActions(state: state)
         case "main" where state["conversationExtras"] != nil:
@@ -367,7 +362,10 @@ final class ZaloEngine {
             handleChat(state: state)
         case "main" where state["conversations"] != nil:
             let rows = state["conversations"] as? [[String: Any]] ?? []
-            conversations = rows.compactMap(Self.conversation).sorted(by: Self.listOrder)
+            let next = rows.compactMap(Self.conversation).sorted(by: Self.listOrder)
+            if conversations != next {
+                conversations = next
+            }
         case "main":
             if let user = state["user"] as? [String: Any], let id = user["userId"] as? String, !id.isEmpty {
                 profile = Profile(
@@ -382,9 +380,63 @@ final class ZaloEngine {
         }
     }
 
+    /// Applies login state events from `state-adapter.js` (`genFirstQR`/`genSecondQR` hooks and DOM snapshots).
+    internal func applyLoginState(_ state: [String: Any]) {
+        guard case .login(var login) = phase else { return }
+        let event = state["event"] as? String
+        let isInvalid = (state["invalid"] as? NSNumber)?.boolValue ?? (state["invalid"] as? Bool) ?? false
+
+        if event == "qr" || event == "qr2" {
+            if let qr = state["qr"] as? String, let png = Self.decodeDataURL(qr) {
+                login.qrPNG = png
+                login.step = .waitingScan
+                phase = .login(login)
+                scheduleExpiry()
+            }
+            return
+        }
+
+        if let name = (state["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            loginTimeout?.cancel()
+            let avatar = (state["avatar"] as? String).flatMap { $0.isEmpty ? nil : URL(string: $0) }
+            login.step = .waitingConfirm(name: name, avatar: avatar)
+            phase = .login(login)
+            return
+        }
+
+        if isInvalid {
+            loginTimeout?.cancel()
+            if login.qrPNG != nil {
+                login.step = .expired
+            } else {
+                login.step = .failed("Mã QR đã hết hạn.")
+            }
+            phase = .login(login)
+            return
+        }
+
+        if let qr = state["qr"] as? String, let png = Self.decodeDataURL(qr) {
+            let isNewQR = login.qrPNG != png
+            login.qrPNG = png
+            switch login.step {
+            case .generating:
+                login.step = .waitingScan
+                scheduleExpiry()
+            case .expired, .failed, .waitingConfirm where isNewQR:
+                login.step = .waitingScan
+                scheduleExpiry()
+            case .waitingScan where isNewQR:
+                scheduleExpiry()
+            default:
+                break
+            }
+            phase = .login(login)
+        }
+    }
+
     /// The QR login long-polls (`qr-id.zaloapp.com/polling/qr/*`) pass through
     /// Swift's proxy; the official client handles them, we just mirror progress.
-    private func observe(url: URL, status: Int, body: Data) {
+    internal func observe(url: URL, status: Int, body: Data) {
         if url.path().hasSuffix("/api/session/kickout-info") {
             // The server signed this session out — Zalo allows one desktop (PC) session per account.
             EngineLog.shared.write("session kicked by server")
@@ -396,20 +448,35 @@ final class ZaloEngine {
         let data = json["data"] as? [String: Any] ?? json
         let code = (json["error_code"] as? NSNumber)?.intValue ?? 0
         EngineLog.shared.write("qr-poll \(url.path()) error_code=\(code) data.keys=\(data.keys.sorted())")
-        if let name = data["display_name"] as? String, !name.isEmpty {
+        if code == 0, let name = data["display_name"] as? String, !name.isEmpty {
+            loginTimeout?.cancel()
             login.step = .waitingConfirm(name: name, avatar: (data["avatar"] as? String).flatMap(URL.init(string:)))
             phase = .login(login)
-        } else if code != 0, let message = json["error_message"] as? String, !message.isEmpty {
-            login.step = .failed(message)
+        } else if code == -20 {
+            // Multi-layer / Trusted-Device login: phone scanned QR1 and server issued parameters for QR2 (`genSecondQR`).
+            // Keep `.waitingScan` (or return to `.waitingScan`) while `genSecondQR` updates `qrPNG`.
+            if let base64 = data["base64_qr"] as? String, !base64.isEmpty,
+               let png = Self.decodeDataURL(base64.hasPrefix("data:") ? base64 : "data:image/png;base64,\(base64)") {
+                login.qrPNG = png
+            }
+            login.step = .waitingScan
+            phase = .login(login)
+            scheduleExpiry()
+        } else if code == 18010 || code == -21 {
+            // 18010: mobile user rejected login; -21: QR2 relink failed.
+            loginTimeout?.cancel()
+            login.step = .expired
             phase = .login(login)
         }
+        // Other non-zero codes on `qr-id.*` (e.g. 408 per-request long-poll tick timeout) are retried
+        // automatically by the official client's `Dr(url, qrTimeout, qrRetry)` loop; never clobber UI here.
     }
 
-    /// The server sets `qr_timeout`; mirror the official page's expiry UI.
+    /// The server sets `qr_timeout`; mirror the official page's expiry UI as a fallback if DOM `invalid` has not fired yet.
     private func scheduleExpiry() {
         loginTimeout?.cancel()
         loginTimeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(100))
+            try? await Task.sleep(for: .seconds(150))
             guard !Task.isCancelled, let self, case .login(var login) = self.phase,
                   case .waitingScan = login.step else { return }
             login.step = .expired
@@ -493,6 +560,22 @@ final class ZaloEngine {
 
     static func decodeDataURL(_ url: String) -> Data? {
         guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
-        return Data(base64Encoded: String(url[url.index(after: comma)...]))
+        let header = url[..<comma].lowercased()
+        let payload = String(url[url.index(after: comma)...])
+        guard !payload.isEmpty else { return nil }
+        let data: Data?
+        if header.contains(";base64") {
+            data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
+        } else {
+            let decoded = payload.removingPercentEncoding ?? payload
+            data = decoded.data(using: .utf8)
+        }
+        guard let data, !data.isEmpty else { return nil }
+        // Reject the 42x42 loading spinner SVG (`Pe` in login.html) so it is never mistaken for a QR code.
+        if header.contains("svg"), let svg = String(data: data, encoding: .utf8),
+           svg.contains("animateTransform") || svg.contains("viewBox=\"0 0 42 42\"") {
+            return nil
+        }
+        return data
     }
 }

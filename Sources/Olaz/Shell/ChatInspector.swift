@@ -157,7 +157,10 @@ struct ChatInspector: View {
     }
 
     private func actionGlyph(_ symbol: String) -> some View {
-        Image(systemName: symbol).font(.system(size: 16)).frame(width: 22, height: 22)
+        CenteredSymbol(symbol, size: 16, weight: .medium, box: 22)
+            .frame(width: 38, height: 38)
+            .contentShape(Circle())
+            .glassEffect(.regular.interactive(), in: Circle())
     }
 
     // MARK: Group
@@ -277,10 +280,14 @@ struct ChatInspector: View {
                 list { emptyOrLoading(.images, "Chưa có ảnh hoặc video") }
             } else {
                 let tile = max(48, ((SharedMediaGrid.contentWidth(outer: outerWidth, inset: 16) - 8) / 3).rounded(.down))
+                let gallery: [ChatMessage] = {
+                    let all = media.listing(.images, loaded: engine.messages[id] ?? []).items
+                    return all.isEmpty ? items : all
+                }()
                 VStack(spacing: 6) {
                     LazyVGrid(columns: Array(repeating: GridItem(.fixed(tile), spacing: 4), count: 3), spacing: 4) {
                         ForEach(items) { message in
-                            SharedMediaTile(message: message, conversationId: id, side: tile)
+                            SharedMediaTile(message: message, conversationId: id, side: tile, gallery: gallery)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -389,9 +396,8 @@ private extension View {
     func glassAction() -> some View {
         menuStyle(.button)
             .menuIndicator(.hidden)
-            .buttonStyle(.glass)
-            .buttonBorderShape(.circle)
-            .controlSize(.large)
+            .buttonStyle(.plain)
+            .fixedSize()
     }
 }
 

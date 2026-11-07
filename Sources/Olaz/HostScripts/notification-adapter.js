@@ -197,7 +197,7 @@
     if (force || key !== lastKey) { lastKey = key; post(snap); }
     return true;
   };
-  const publishSoon = () => { setTimeout(() => publish(false), 250); setTimeout(() => publish(false), 1500); };
+  const publishSoon = () => { setTimeout(() => publish(false), 60); setTimeout(() => publish(false), 250); setTimeout(() => publish(false), 1500); };
 
   window.__zaloNotification = {
     setPermission(p) { permission = p === 'granted' || p === 'denied' ? p : 'default'; },
@@ -249,6 +249,7 @@
   };
 
   const t = setInterval(() => { try { publish(false); } catch (e) { diag('publish failed: ' + e); } }, 1500);
+  window.addEventListener('storage', () => { try { publish(false); } catch {} });
   window.addEventListener('beforeunload', () => clearInterval(t));
   post({ kind: 'ready' });
   diag('shim installed');
