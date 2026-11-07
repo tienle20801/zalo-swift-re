@@ -67,6 +67,7 @@ final class ZaloEngine {
 
     internal(set) var phase: Phase = .starting
     private(set) var conversations: [ConversationSummary] = []
+    private(set) var conversationsById: [String: ConversationSummary] = [:]
     private(set) var profile: Profile?
     /// Why the session ended, shown on the login screen (e.g. kicked by another PC login).
     private(set) var signOutNotice: String?
@@ -365,6 +366,7 @@ final class ZaloEngine {
             let next = rows.compactMap(Self.conversation).sorted(by: Self.listOrder)
             if conversations != next {
                 conversations = next
+                conversationsById = Dictionary(next.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             }
         case "main":
             if let user = state["user"] as? [String: Any], let id = user["userId"] as? String, !id.isEmpty {

@@ -128,12 +128,12 @@
         publish();
         diag('redux store attached');
       };
-      const tryAttach = () => { const s = findStore(); if (s) { attach(s); startConversations(); return true; } return false; };
+      const tryAttach = () => { const s = findStore(); if (s) { attach(s); startConversations(s); return true; } return false; };
 
       // Conversation list from the official services: conv-info-manager (index),
       // friend/group modules (names, avatars), unread-manager, preview-manager.
       let convTimer = null;
-      const startConversations = () => {
+      const startConversations = (store) => {
         if (convTimer) return;
         const regs = () => diRegistrations(req);
         const pick = (pred) => { for (const r of regs()) { const i = r.instance; if (i && typeof i === 'object') { try { if (pred(i)) return i; } catch {} } } return null; };
@@ -221,12 +221,25 @@
           }
           return textOf(p.computedMessage) || textOf(p.message) || textOf(p.content) || LABEL_BY_TYPE[Number(p.messageType)] || '';
         };
+        const previewCache = new Map();
         const previewOf = (m, id) => {
           const p = safe(() => m.preview.data.get(id), null);
-          if (!p) return null;
+          if (!p) { previewCache.delete(id); return null; }
           // Preview items (preview-manager): {message, computedMessage, messageTime, fromUid ('0' = me), messageType}.
+          const ts = Number(p.messageTime || p.sendDttm || p.ts || 0);
+          const fromMe = !!p.isMe || String(p.fromUid) === '0';
+          const type = p.messageType || p.msgType || '';
+          const rawMsg = p.computedMessage ?? p.message ?? p.content;
+          const hasFmt = !!findFormatter();
+          const hit = previewCache.get(id);
+          if (hit && hit.p === p && hit.ts === ts && hit.fromMe === fromMe && hit.type === type && hit.rawMsg === rawMsg && hit.hasFmt === hasFmt) {
+            return hit.value;
+          }
           const text = safe(() => previewText(p), '') || '';
-          return { text: String(text).slice(0, 200), ts: Number(p.messageTime || p.sendDttm || p.ts || 0), fromMe: !!p.isMe || String(p.fromUid) === '0', type: p.messageType || p.msgType || '' };
+          const value = { text: String(text).slice(0, 200), ts, fromMe, type };
+          if (previewCache.size > 5000) previewCache.clear();
+          previewCache.set(id, { p, ts, fromMe, type, rawMsg, hasFmt, value });
+          return value;
         };
         let pending = null, pendingDue = 0, pendingSeq = 0, hooked = false;
         const schedule = (ms) => {
@@ -276,6 +289,7 @@
           const key = JSON.stringify(rows);
           if (key !== lastKey) { lastKey = key; post({ page: 'main', conversations: rows }); }
         };
+        if (store && typeof store.subscribe === 'function') store.subscribe(() => schedule(120));
         convTimer = setInterval(() => { publish().catch((e) => diag('conversations publish failed: ' + e)); }, 1500);
         publish().catch(() => {});
       };

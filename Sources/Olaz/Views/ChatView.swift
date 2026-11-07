@@ -290,6 +290,7 @@ final class RowCache {
     private var source: [ChatMessage] = []
     private var days: [Date] = []
     private var rows: [ChatRow] = []
+    var lastContentHeight: CGFloat = 0
 
     func rows(for msgs: [ChatMessage]) -> [ChatRow] {
         if msgs == source { return rows }
@@ -345,7 +346,6 @@ private struct MessageList: View {
     @State private var cache = RowCache()
     @State private var atTop = false
     @State private var nearBottom = true
-    @State private var lastContentHeight: CGFloat = 0
     @State private var loadingOlder = false
     @State private var olderTask: Task<Void, Never>?
     @State private var topId: String?
@@ -357,10 +357,10 @@ private struct MessageList: View {
     private var id: String { conversation.id }
 
     private struct Metrics: Equatable {
-        var top: CGFloat
-        var fromBottom: CGFloat
-        var content: CGFloat
-        var visible: CGFloat
+        var atTopBand: Bool
+        var nearBottomBand: Bool
+        var shortContent: Bool
+        var contentHeight: Int
     }
 
     var body: some View {
@@ -398,21 +398,23 @@ private struct MessageList: View {
             .scrollEdgeEffectStyle(.hard, for: .top)
             .scrollEdgeEffectStyle(.soft, for: .bottom)
             .onScrollGeometryChange(for: Metrics.self) { geo in
-                Metrics(top: geo.contentOffset.y + geo.contentInsets.top,
-                        fromBottom: geo.contentSize.height - geo.visibleRect.maxY,
-                        content: geo.contentSize.height,
-                        visible: geo.visibleRect.height)
+                let topOffset = geo.contentOffset.y + geo.contentInsets.top
+                let fromBottom = geo.contentSize.height - geo.visibleRect.maxY
+                return Metrics(atTopBand: topOffset < 120,
+                               nearBottomBand: fromBottom < 160,
+                               shortContent: geo.contentSize.height - geo.visibleRect.height < 120,
+                               contentHeight: Int(geo.contentSize.height.rounded()))
             } action: { _, m in
-                let top = m.top < 120
+                let top = m.atTopBand
                 // Re-armed once the reader is away from the top, or when the history is too short to ever leave the top band.
-                if !olderArmed, !top || m.content - m.visible < 120 { olderArmed = true }
+                if !olderArmed, !top || m.shortContent { olderArmed = true }
                 if top != atTop { atTop = top }
                 // Only user scrolling (not content growth) changes "near bottom".
-                if abs(m.content - lastContentHeight) < 1 {
-                    let near = m.fromBottom < 160
-                    if near != nearBottom { nearBottom = near }
+                let content = CGFloat(m.contentHeight)
+                if abs(content - cache.lastContentHeight) <= 1 {
+                    if m.nearBottomBand != nearBottom { nearBottom = m.nearBottomBand }
                 }
-                lastContentHeight = m.content
+                cache.lastContentHeight = content
             }
             .onChange(of: atTop) { _, _ in maybeLoadOlder(hasMore: hasMore, count: msgs.count) }
             .onChange(of: olderArmed) { _, _ in maybeLoadOlder(hasMore: hasMore, count: msgs.count) }

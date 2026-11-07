@@ -752,10 +752,17 @@
     }, cardExtra || {});
   };
 
-  const mapAll = (list, convId) => {
+  const msgCache = new WeakMap();
+  const sigByMapped = new WeakMap();
+  const mapAll = (list, convId, useCache) => {
     const out = [];
     const seen = new Set();
-    const push = (j) => { if (!j || seen.has(j.id)) return; seen.add(j.id); out.push(j); };
+    const push = (j, sig) => {
+      if (!j || seen.has(j.id)) return;
+      seen.add(j.id);
+      if (sig) sigByMapped.set(j, sig);
+      out.push(j);
+    };
     for (const m of list) {
       if (!m || typeof m !== 'object') continue;
       try {
@@ -770,7 +777,26 @@
         });
         continue;
       }
-      push(mapOne(m, convId));
+      const reactRec = reactionsById.get(String(m.msgId || ''));
+      if (useCache) {
+        const hit = msgCache.get(m);
+        if (hit && hit.convId === convId && hit.status === m.status && hit.msgId === m.msgId
+          && hit.cliMsgId === m.cliMsgId && hit.message === m.message && hit.sendDttm === m.sendDttm
+          && hit.starred === m.starred && hit.e2eeStatus === m.e2eeStatus && hit.reactRec === reactRec
+          && (hit.mapped.isMine || (hit.mapped.senderName && hit.mapped.senderAvatar))) {
+          push(hit.mapped, hit.sig);
+          continue;
+        }
+      }
+      const j = mapOne(m, convId);
+      if (j) {
+        const sig = JSON.stringify(j);
+        msgCache.set(m, {
+          convId, status: m.status, msgId: m.msgId, cliMsgId: m.cliMsgId, message: m.message,
+          sendDttm: m.sendDttm, starred: m.starred, e2eeStatus: m.e2eeStatus, reactRec, mapped: j, sig
+        });
+        push(j, sig);
+      }
       } catch (e) { diag('mapOne ' + scrubErr(e)); } // one bad message must not stall the conversation
     }
     return out;
@@ -862,13 +888,14 @@
   };
   const schedule = (ms) => {
     if (!track.id) return;
-    const delay = typeof ms === 'number' ? ms : 60, due = Date.now() + delay;
+    const delay = typeof ms === 'number' ? ms : 40, due = Date.now() + delay;
     if (timer && timerDue <= due) return;
     if (timer) clearTimeout(timer);
     timerDue = due;
     const seq = ++timerSeq;
     timer = setTimeout(() => { if (seq !== timerSeq) return; timer = null; timerDue = 0; flush(); }, delay);
   };
+  const flushNow = () => { if (timer) { clearTimeout(timer); timer = null; timerDue = 0; timerSeq++; } flush(); };
   const flush = () => {
     const id = track.id;
     if (!id) return;
@@ -880,15 +907,16 @@
     // An empty list while the official load is still in flight is not the truth yet; don't clear the UI.
     if (forceReset && !messages.length && openingId === id) return;
     if (!dirty && !forceReset && messages === track.lastMessages && conv.msgList === track.lastList) return;
+    const useCache = !dirty && !forceReset;
     dirty = false;
     track.lastMessages = messages; track.lastList = conv.msgList;
     fetchReactions(messages.flatMap(reactionIdsOf));
-    const mapped = mapAll(messages, id);
+    const mapped = mapAll(messages, id, useCache);
     track.needsNames = mapped.some((j) => !j.isMine && (!j.senderName || !j.senderAvatar));
     const hasMore = hasMoreOf(conv);
     if (forceReset) {
       forceReset = false;
-      track.sigs = new Map(mapped.map((j) => [j.id, JSON.stringify(j)]));
+      track.sigs = new Map(mapped.map((j) => [j.id, sigByMapped.get(j) || JSON.stringify(j)]));
       track.lastHasMore = hasMore;
       track.lastRaw = messages.length;
       post({ page: 'main', chat: { convId: id, messages: mapped, removed: [], hasMore, reset: true } });
@@ -897,7 +925,7 @@
     const next = new Map();
     const changed = [];
     for (const j of mapped) {
-      const sig = JSON.stringify(j);
+      const sig = sigByMapped.get(j) || JSON.stringify(j);
       next.set(j.id, sig);
       if (track.sigs.get(j.id) !== sig) changed.push(j);
     }
@@ -929,7 +957,7 @@
   };
 
   // ---- actions ----
-  const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(80); } return null; };
+  const waitFor = async (fn, ms = 4000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = fn(); if (v) return v; await sleep(25); } return null; };
   const ready = async () => {
     resolveAttempts = 0; lastResolve = 0; // an explicit action always gets a fresh round of lookups
     const ok = await waitFor(() => resolveServices() && controller(), 8000);
@@ -1007,13 +1035,13 @@
       }
       const list = isGroupId(convId) ? cleanMentions(mentions, String(text)) : [];
       await cc._processSendMessage(MSG.TEXT, String(text), list, quoted, true, info, true, null, null);
-      await sleep(25);
+      await sleep(15);
     } catch (e) {
       diag('send failed: ' + scrubErr(e));
       return 'error';
     } finally {
       if (quoteMsgId && !direct) safe(() => cc._quoteBannerData._clear(), null);
-      dirty = true; schedule(16);
+      dirty = true; flushNow();
     }
     return 'sent';
   };
@@ -1228,21 +1256,22 @@
       track.id = convId; track.exhausted = false; track.noGrowth = 0; track.nameRetries = 0; track.needsNames = false;
       track.lastMessages = null; track.lastList = null; track.sigs = new Map();
       forceReset = true; dirty = true;
-      schedule(16);
+      flushNow();
       try {
         const cc = controller();
         if (!cc || cc.convId !== convId || switched) await S.opener.openConversation(convId);
         if (stale()) return;
-        const settled = await waitFor(() => !stale() && convOf(convId) && controller() && controller().convId === convId, 1500);
-        if (!settled && !stale()) repairController(convId, true);
-        else if (settled) noteBoxFields(controller());
+        await waitFor(() => !stale() && convOf(convId), 300);
+        if (stale()) return;
+        if (!controller() || controller().convId !== convId) repairController(convId, true);
+        else noteBoxFields(controller());
         if (stale()) return;
         await S.loader.getLastMessagesForConversation(convId, {});
         if (stale()) { deactivate(convId); return; }
         // The chat view marks its loader active so the official in-memory message cache follows the conversation.
         safe(() => S.loader.cacheMessageLoader.get(convId).active(), null);
       } catch (e) { diag('open ' + (e && e.message || e)); }
-      if (!stale()) { openingId = null; dirty = true; schedule(16); }
+      if (!stale()) { openingId = null; dirty = true; flushNow(); }
     },
     async close(convId) {
       convId = String(convId);
