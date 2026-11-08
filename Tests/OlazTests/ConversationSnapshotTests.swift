@@ -424,4 +424,36 @@ import Foundation
         // The remaining 4 conversations must NOT be wiped!
         #expect(engine.conversations.count == 10)
     }
+
+    @Test func initialLiveSyncHandoverSuppressesAnimationsUntilHydrated() {
+        let engine = ZaloEngine()
+        #expect(!engine.hasCompletedInitialLiveSync)
+
+        let conv = ZaloEngine.ConversationSummary(
+            id: "c-1", isGroup: false, name: "Chat 1", avatar: nil,
+            pinned: false, members: 2, unread: 0, preview: nil
+        )
+        let platform = makePlatform()
+        defer { cleanupPlatform(platform) }
+        let snapshot = ConversationSnapshot(
+            version: 2, userId: "u1", timestamp: Date(),
+            conversations: [conv], hiddenIds: [], flags: [:], left: [:],
+            hiddenEnabled: true, hasHiddenPIN: false, markUnreadEnabled: false
+        )
+        ConversationSnapshotStore.save(snapshot, platform: platform)
+        engine.restoreConversationSnapshot(platform: platform)
+
+        // WebKit initial sync starts: hasCompletedInitialLiveSync is still false to suppress animations
+        #expect(!engine.hasCompletedInitialLiveSync)
+
+        // WebKit completes live extras with populated listIds
+        engine.handleConversationExtras(state: [
+            "conversationExtras": [
+                "listIds": ["c-1"]
+            ]
+        ])
+
+        // Live sync has completed: animations may safely resume
+        #expect(engine.hasCompletedInitialLiveSync)
+    }
 }

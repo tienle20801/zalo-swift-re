@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import SwiftUI
 import os
 
 private let engineLog = Logger(subsystem: "app.olaz", category: "engine")
@@ -79,6 +80,8 @@ final class ZaloEngine {
     private(set) var clientVersion: String?
     /// Last renderer diagnostics (shown in Settings ▸ Engine).
     private(set) var recentLog: [String] = []
+    /// Marks whether background WebKit has completed its initial live conversation hydration.
+    internal(set) var hasCompletedInitialLiveSync = false
 
     // Chat state (see ChatModels.swift for the JS contract; logic in ZaloEngine+Chat.swift).
     /// The conversation currently opened in the official client.
@@ -331,6 +334,7 @@ final class ZaloEngine {
             }
             phase = .signingIn
         case .loggedOut:
+            hasCompletedInitialLiveSync = false
             profile = nil
             CardActionCenter.shared.reset()
             resetCardState()
@@ -594,8 +598,12 @@ final class ZaloEngine {
         guard shouldReset || index != conversationIndex else { return }
         conversationIndex = index
         let sorted = index.values.sorted(by: Self.listOrder)
-        if sorted != conversations { conversations = sorted }
-        conversationsById = index
+        var transaction = Transaction(animation: nil)
+        if !hasCompletedInitialLiveSync { transaction.disablesAnimations = true }
+        withTransaction(transaction) {
+            if sorted != conversations { conversations = sorted }
+            conversationsById = index
+        }
     }
 
     private static func conversation(_ row: [String: Any]) -> ConversationSummary? {

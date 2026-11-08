@@ -196,6 +196,15 @@ extension ZaloEngine {
         if let action = json["action"] as? [String: Any], let seq = (action["seq"] as? NSNumber)?.intValue {
             next.notice = ConversationExtras.Notice(seq: seq, ok: action["ok"] as? Bool ?? false, text: action["text"] as? String ?? "")
         }
-        if next != conversationExtras { conversationExtras = next }
+        if next != conversationExtras {
+            var transaction = Transaction(animation: nil)
+            if !hasCompletedInitialLiveSync { transaction.disablesAnimations = true }
+            withTransaction(transaction) {
+                conversationExtras = next
+            }
+        }
+        if next.loaded && !next.listIds.isEmpty && !conversations.isEmpty {
+            hasCompletedInitialLiveSync = true
+        }
     }
 }

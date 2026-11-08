@@ -230,6 +230,12 @@ struct ConversationListColumn: View {
         }
         .listStyle(.inset)
         .scrollEdgeEffectStyle(.soft, for: .top)
+        .transaction { transaction in
+            if !engine.hasCompletedInitialLiveSync {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
+        }
     }
 
     private func rows(_ items: [ListItem]) -> some View {
