@@ -62,6 +62,23 @@ struct ScreenshotShare: Identifiable, Equatable {
     var conversationId: String
 }
 
+/// An image pasted with ⌘V waiting in the conversation's composer tray (`StagedImageStrip`) to be sent with an optional caption.
+struct StagedImage: Identifiable, Equatable {
+    let id: UUID
+    let image: NSImage
+    let fileURL: URL
+
+    init(id: UUID = UUID(), image: NSImage, fileURL: URL) {
+        self.id = id
+        self.image = image
+        self.fileURL = fileURL
+    }
+
+    static func == (lhs: StagedImage, rhs: StagedImage) -> Bool {
+        lhs.id == rhs.id && lhs.fileURL == rhs.fileURL
+    }
+}
+
 /// My own contact card as the official "Gửi danh thiếp" modal would send it.
 struct MyCardInfo: Equatable {
     var uid: String
@@ -129,12 +146,70 @@ enum ReminderRepeat: Int, CaseIterable, Identifiable {
 }
 
 extension ZaloEngine {
+    static let maxStagedImages = 50
+
     // MARK: Attachments
 
     /// "Ảnh hoặc Video": photos through the official photo button's path, videos and other files as files.
-    func sendMedia(_ urls: [URL], to id: String) async -> ComposerOutcome {
+    func sendMedia(_ urls: [URL], to id: String, caption: String? = nil) async -> ComposerOutcome {
         let prepared = Self.prepareAttachmentURLs(urls, convertUnsupportedPhotos: true)
-        return await composeWithFiles("sendMedia", [id], files: prepared)
+        let trimmed = caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let args: [Any] = trimmed.isEmpty ? [id] : [id, trimmed]
+        return await composeWithFiles("sendMedia", args, files: prepared)
+    }
+
+    func stageImageFile(_ fileURL: URL, image: NSImage? = nil, in id: String) {
+        guard !id.isEmpty else { return }
+        var current = stagedImages[id] ?? []
+        guard current.count < Self.maxStagedImages else {
+            CardActionCenter.shared.show("Chỉ gửi được tối đa \(Self.maxStagedImages) ảnh mỗi lần.", in: id)
+            return
+        }
+        guard let resolvedImage = image ?? NSImage(contentsOf: fileURL) else { return }
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
+        MediaLoader.allowUserAttachment(resolvedURL)
+        current.append(StagedImage(image: resolvedImage, fileURL: resolvedURL))
+        stagedImages[id] = current
+    }
+
+    func stageImages(_ images: [NSImage], in id: String) {
+        guard !id.isEmpty, !images.isEmpty else { return }
+        var current = stagedImages[id] ?? []
+        let remaining = max(0, Self.maxStagedImages - current.count)
+        guard remaining > 0 else {
+            CardActionCenter.shared.show("Chỉ gửi được tối đa \(Self.maxStagedImages) ảnh mỗi lần.", in: id)
+            return
+        }
+        for img in images.prefix(remaining) {
+            let pngData = ClipboardPasteContent.renderImageToPNG(img, opaqueWhiteBackground: false)?.data
+                ?? img.tiffRepresentation.flatMap { NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:]) }
+            let fileURL = pngData.flatMap { Self.writeTemporaryPasteImage($0, prefix: "clipboard") }
+                ?? FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                    .appendingPathComponent("OlazAttachments/staged-\(UUID().uuidString).png")
+            MediaLoader.allowUserAttachment(fileURL)
+            current.append(StagedImage(image: img, fileURL: fileURL))
+        }
+        stagedImages[id] = current
+    }
+
+    func removeStagedImage(_ itemId: UUID, in id: String) {
+        guard var current = stagedImages[id] else { return }
+        current.removeAll { $0.id == itemId }
+        stagedImages[id] = current.isEmpty ? nil : current
+    }
+
+    func clearStagedImages(in id: String) {
+        stagedImages[id] = nil
+    }
+
+    func takeStagedImages(for id: String) -> [StagedImage] {
+        stagedImages.removeValue(forKey: id) ?? []
+    }
+
+    func restoreStagedImages(_ items: [StagedImage], in id: String) {
+        guard !id.isEmpty, !items.isEmpty else { return }
+        let existing = stagedImages[id] ?? []
+        stagedImages[id] = Array((items + existing).prefix(Self.maxStagedImages))
     }
 
     /// "Tệp": the official file button's path.
@@ -173,7 +248,9 @@ extension ZaloEngine {
                     continue
                 }
             }
-            out.append(url.resolvingSymlinksInPath())
+            let resolved = url.resolvingSymlinksInPath()
+            MediaLoader.allowUserAttachment(resolved)
+            out.append(resolved)
         }
         return out
     }
@@ -389,6 +466,7 @@ extension ZaloEngine {
         dropComposerConfirms()
         screenshotShare = nil
         screenCaptureNeedsPermission = false
+        stagedImages = [:]
     }
 
     /// Shows a failure or pending text for a composer action as the conversation's toast.

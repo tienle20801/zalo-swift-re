@@ -219,4 +219,28 @@ struct ComposerTests {
         #expect(tv.readablePasteboardTypes.contains(.tiff))
         #expect(tv.readablePasteboardTypes.contains(.fileURL))
     }
+
+    @MainActor @Test func stagedImagesStageRemoveAndTakePerConversation() {
+        let engine = ZaloEngine()
+        let first = NSImage(size: NSSize(width: 4, height: 4))
+        let second = NSImage(size: NSSize(width: 8, height: 8))
+        engine.stageImages([first, second], in: "conv-1")
+        #expect(engine.stagedImages["conv-1"]?.count == 2)
+        #expect(engine.stagedImages["conv-2"] == nil)
+
+        if let firstId = engine.stagedImages["conv-1"]?.first?.id {
+            engine.removeStagedImage(firstId, in: "conv-1")
+        }
+        #expect(engine.stagedImages["conv-1"]?.count == 1)
+
+        let taken = engine.takeStagedImages(for: "conv-1")
+        #expect(taken.count == 1)
+        #expect(engine.stagedImages["conv-1"] == nil)
+
+        engine.restoreStagedImages(taken, in: "conv-1")
+        #expect(engine.stagedImages["conv-1"]?.count == 1)
+
+        engine.clearStagedImages(in: "conv-1")
+        #expect(engine.stagedImages["conv-1"] == nil)
+    }
 }

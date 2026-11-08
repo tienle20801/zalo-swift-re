@@ -497,6 +497,47 @@
   // Hidden: cards the official client does not draw. mapAll drops them.
   const HIDDEN = { kind: null, text: '' };
 
+  const localPhotoByCliId = new Map();
+  const toFileUrl = (p) => (typeof p === 'string' && p.startsWith('/') ? 'file://' + encodeURI(p) : '');
+  const localPhotoPathOf = (m, o, p) => {
+    const cli = String((m && m.cliMsgId) ?? '');
+    const validCli = cli && cli !== '0' && cli !== 'undefined';
+    if (m && typeof m.__olazLocalPath === 'string' && m.__olazLocalPath.startsWith('/')) return m.__olazLocalPath;
+    if (validCli && localPhotoByCliId.has(cli)) return localPhotoByCliId.get(cli);
+    const direct = str(o.path || o.localPath || o.clientFilePath || p.localPath || p.path);
+    if (direct.startsWith('/')) {
+      if (m && typeof m === 'object') m.__olazLocalPath = direct;
+      if (validCli) localPhotoByCliId.set(cli, direct);
+      return direct;
+    }
+    const fromUid = String(m && (m.fromUid ?? m.uidFrom ?? ''));
+    const mine = fromUid === '0' || (!!meNow() && fromUid === meNow());
+    if (!mine) return '';
+    const q = Array.isArray(window.__olazPendingPhotoPaths) ? window.__olazPendingPhotoPaths : [];
+    const now = Date.now();
+    while (q.length && now - (Number(q[0].ts) || 0) > 60000) q.shift();
+    if (!q.length) return '';
+    const picked = q.shift();
+    if (picked && typeof picked.path === 'string' && picked.path.startsWith('/')) {
+      if (m && typeof m === 'object') m.__olazLocalPath = picked.path;
+      if (validCli) {
+        if (localPhotoByCliId.size > 200) localPhotoByCliId.clear();
+        localPhotoByCliId.set(cli, picked.path);
+      }
+      return picked.path;
+    }
+    return '';
+  };
+  const photoUrlOf = (m, o, p) => {
+    const raw = str(o.normalUrl || o.hdUrl || o.oriUrl || o.thumbUrl || o.href || o.thumb).trim();
+    if (raw.startsWith('/')) {
+      if (m && typeof m === 'object') m.__olazLocalPath = raw;
+      return toFileUrl(raw);
+    }
+    if (raw && !raw.startsWith('blob:')) return raw;
+    return toFileUrl(localPhotoPathOf(m, o, p));
+  };
+
   // Returns {kind, text} (kind null = draws nothing).
   const mapContent = (m, convId) => {
     const t = Number(m.msgType);
@@ -512,7 +553,7 @@
         if (o.action === 'msginfo.actionlist') { const txt = infoText(p) || str(o.title); return notice('info.circle', txt); }
         return { kind: { type: 'text' }, text: asText || str(o.title) || str(o.msg) || str(o.description) };
       case MSG.PHOTO: case MSG.PHOTO_2:
-        return { kind: { type: 'photo', url: o.normalUrl || o.hdUrl || o.oriUrl || o.thumbUrl || str(o.href) || str(o.thumb), width: num(p.width || o.width), height: num(p.height || o.height) }, text: str(o.title) || FALLBACK.photo };
+        return { kind: { type: 'photo', url: photoUrlOf(m, o, p), width: num(p.width || o.width), height: num(p.height || o.height) }, text: str(o.title) || FALLBACK.photo };
       case MSG.DOODLE:
         return { kind: { type: 'photo', url: str(o.href) || str(o.thumb), width: num(p.width), height: num(p.height) }, text: FALLBACK.doodle };
       case MSG.STICKER: case MSG.STICKER_2: case MSG.STICKER_GROUP:
@@ -778,11 +819,14 @@
         continue;
       }
       const reactRec = reactionsById.get(String(m.msgId || ''));
+      const mo = m.message && typeof m.message === 'object' && !Array.isArray(m.message) ? m.message : null;
+      const mUrl = mo ? str(mo.normalUrl || mo.hdUrl || mo.oriUrl || mo.thumbUrl || mo.href || mo.thumb) : '';
+      const mParams = mo ? str(mo.params) : '';
       if (useCache) {
         const hit = msgCache.get(m);
         if (hit && hit.convId === convId && hit.status === m.status && hit.msgId === m.msgId
-          && hit.cliMsgId === m.cliMsgId && hit.message === m.message && hit.sendDttm === m.sendDttm
-          && hit.starred === m.starred && hit.e2eeStatus === m.e2eeStatus && hit.reactRec === reactRec
+          && hit.cliMsgId === m.cliMsgId && hit.message === m.message && hit.mUrl === mUrl && hit.mParams === mParams
+          && hit.sendDttm === m.sendDttm && hit.starred === m.starred && hit.e2eeStatus === m.e2eeStatus && hit.reactRec === reactRec
           && (hit.mapped.isMine || (hit.mapped.senderName && hit.mapped.senderAvatar))) {
           push(hit.mapped, hit.sig);
           continue;
@@ -792,7 +836,7 @@
       if (j) {
         const sig = JSON.stringify(j);
         msgCache.set(m, {
-          convId, status: m.status, msgId: m.msgId, cliMsgId: m.cliMsgId, message: m.message,
+          convId, status: m.status, msgId: m.msgId, cliMsgId: m.cliMsgId, message: m.message, mUrl, mParams,
           sendDttm: m.sendDttm, starred: m.starred, e2eeStatus: m.e2eeStatus, reactRec, mapped: j, sig
         });
         push(j, sig);
@@ -1195,6 +1239,11 @@
     if (!mods) return done('unavailable', { reason: 'modules' });
     const msg = findMessage(convId, msgId) || storeMessage(convId, msgId);
     if (!msg || !msg.message) return done('unavailable', { reason: 'message' });
+    const cliKey = String(msg.cliMsgId ?? '');
+    const stagedPath = (typeof msg.__olazLocalPath === 'string' && msg.__olazLocalPath) || (cliKey && localPhotoByCliId.get(cliKey)) || '';
+    if (kind === 'photo' && stagedPath.startsWith('/')) {
+      return done('ok', { path: stagedPath, source: 'local', quality: 'oriUrl' });
+    }
     const loc = mods.locator;
     let cands = [];
     try {
@@ -1205,8 +1254,11 @@
         cands = loc.d([loc.b.ThumbUrl], msg);
       }
     } catch (e) { diag('resolveMedia candidates: ' + (e && e.message || e)); }
-    cands = cands.filter((c) => c && c.url);
-    if (!cands.length) return done('unavailable', { reason: 'no-source' });
+    cands = cands.filter((c) => c && c.url && !String(c.url).startsWith('blob:'));
+    if (!cands.length) {
+      const sending = Number(msg.status) === ST.LOCAL || Number(msg.status) <= -20;
+      return done('unavailable', { reason: sending ? 'not-ready' : 'no-source' });
+    }
     // 1. A copy the official client already stored.
     for (const c of cands) {
       if (c.localPath && await mods.files.fileExists(c.localPath)) return done('ok', { path: c.localPath, source: 'local', quality: c.type });

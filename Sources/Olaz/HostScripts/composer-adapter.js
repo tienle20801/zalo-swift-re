@@ -301,10 +301,14 @@
           ? `zalo-app://local/__olaz/pending-file/${encodeURIComponent(token)}/${item.index}`
           : `zalo-app://local/__olaz/pending-file/${item.index}`;
         const buf = await fetchArrayBuffer(path);
-        out.push(new File([new Uint8Array(buf)], item.name || 'file', {
+        const f = new File([new Uint8Array(buf)], item.name || 'file', {
           type: item.mime || 'application/octet-stream',
           lastModified: Number(item.lastModified) || Date.now(),
-        }));
+        });
+        if (item.path) {
+          try { Object.defineProperty(f, 'path', { value: String(item.path), configurable: true, enumerable: true }); } catch {}
+        }
+        out.push(f);
       }
       return out;
     } catch (e) {
@@ -317,6 +321,16 @@
     const token = str(window.__olazPendingPickToken || '');
     window.__olazPendingPickToken = '';
     const meta = readPendingMetaSync(token);
+    if (meta.length) {
+      const q = (window.__olazPendingPhotoPaths = window.__olazPendingPhotoPaths || []);
+      const exts = photoExts();
+      for (const item of meta) {
+        if (item && item.path && exts.includes(extOf(item.name))) {
+          q.push({ path: String(item.path), name: String(item.name || ''), size: Number(item.size) || 0, ts: Date.now() });
+        }
+      }
+      while (q.length > 30) q.shift();
+    }
     if (meta.length && meta.every((m) => Number(m.size) >= 0 && Number(m.size) <= INLINE_FILE_LIMIT)) {
       return fallbackPendingFiles(token, meta);
     }
@@ -384,7 +398,7 @@
     return withScope(convId, async () => {
       const files = await picked;
       if (!files.length) return { status: 'cancelled' };
-      const box = await boxOrStatus(convId, true);
+      const box = await boxOrStatus(convId, false);
       if (box.status) return box;
       if (locked(convId)) return { status: 'locked', text: LOCKED_TEXT };
       uploadAsFiles(box, files);
@@ -394,13 +408,14 @@
   };
 
   // Photos the official photo button takes (`supportPhoto`) go its way; videos and anything else go as files, as on Zalo PC.
-  const sendMedia = (convId) => {
+  const sendMedia = (convId, caption) => {
     const picked = pickFiles();
     convId = String(convId);
+    const title = str(caption).trim();
     return withScope(convId, async () => {
       const files = await picked;
       if (!files.length) return { status: 'cancelled' };
-      const box = await boxOrStatus(convId, true);
+      const box = await boxOrStatus(convId, false);
       if (box.status) return box;
       if (locked(convId)) return { status: 'locked', text: LOCKED_TEXT };
       if (files.length > maxFiles()) { box.cc._notifySendTooManyFile(); return { status: 'invalid' }; }
@@ -408,8 +423,19 @@
       const photos = files.filter((f) => exts.includes(extOf(f.name)));
       const others = files.filter((f) => !photos.includes(f));
       safe(() => { box.cc.mouseOverChatInput = false; }, null);
-      if (photos.length) await box.cc._uploadImg({ target: { files: photos, value: '' } }, Object.assign({}, box.info), SRC().Photo.CLICK_ICON_SEND_PHOTO, false);
-      if (others.length) uploadAsFiles(box, others);
+      if (photos.length === 1 && !others.length && title) {
+        const targetConv = Object.assign({}, box.info);
+        const opts = { isPasted: false, isUploaded: true, withoutPreview: true, targetConv, title, sendSource: SRC().Photo.CLICK_ICON_SEND_PHOTO };
+        try {
+          await box.cc._uploadDragPhoto(photos[0], opts);
+        } catch (e) {
+          if (!e || !e.code) throw e;
+          safe(() => M.overlimit && M.overlimit.b({ [e.code]: [photos[0]] }, box.cc.windowId, box.cc._sendOverlimitPhoto.bind(box.cc, targetConv)), null);
+        }
+      } else {
+        if (photos.length) await box.cc._uploadImg({ target: { files: photos, value: '' } }, Object.assign({}, box.info), SRC().Photo.CLICK_ICON_SEND_PHOTO, false);
+        if (others.length) uploadAsFiles(box, others);
+      }
       diag(`media photos=${photos.length} files=${others.length}`);
       return { status: 'done' };
     });

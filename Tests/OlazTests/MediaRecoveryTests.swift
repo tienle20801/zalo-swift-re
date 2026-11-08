@@ -385,12 +385,36 @@ private func hasQuarantine(_ url: URL) -> Bool { getxattr(url.path, "com.apple.q
         _ = await gate.value; _ = await older.value; _ = await newest.value; _ = await stale.value
         #expect(order == ["head", "newest", "older"])
     }
+
+    @MainActor @Test func forgetClearsRememberedUnavailableVerdictForMessage() async {
+        let resolver = MediaResolver()
+        var calls = 0
+        let first = await resolver.resolve(key: "c1|m1|photo") { calls += 1; return .unavailable }
+        #expect(first == .unavailable && calls == 1)
+        // Cached `.unavailable` is returned without calling `run` again.
+        let cached = await resolver.resolve(key: "c1|m1|photo") { calls += 1; return .expired }
+        #expect(cached == .unavailable && calls == 1)
+        // When the message transitions from `.sending` to `.sent`, `forget` drops `.unavailable` so the next lookup runs fresh.
+        resolver.forget(conversationId: "c1", messageId: "m1")
+        let afterUpdate = await resolver.resolve(key: "c1|m1|photo") { calls += 1; return .file(URL(fileURLWithPath: "/tmp/ok.png")) }
+        #expect(afterUpdate == .file(URL(fileURLWithPath: "/tmp/ok.png")) && calls == 2)
+    }
 }
 
 @Suite struct LocalMediaFileTests {
     @Test func onlyOurDirectoriesAreReadable() {
         let inside = ZaloPlatform.defaultUserData.appendingPathComponent("ZaloPC/1/ZaloDownloads/resource/c/picture/x.jpg")
         #expect(MediaLoader.isAllowedLocalFile(inside))
+        let pasted = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("OlazAttachments/clipboard-1.png")
+        #expect(MediaLoader.isAllowedLocalFile(pasted))
+        #expect(MediaLoader.isOwnLocalFile(pasted))
+        let picked = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("user-picked-\(UUID().uuidString).png")
+        #expect(!MediaLoader.isAllowedLocalFile(picked))
+        MediaLoader.allowUserAttachment(picked)
+        #expect(MediaLoader.isAllowedLocalFile(picked))
+        #expect(!MediaLoader.isOwnLocalFile(picked)) // user-picked files are readable, never deletable
         #expect(!MediaLoader.isAllowedLocalFile(URL(fileURLWithPath: "/etc/hosts")))
         #expect(!MediaLoader.isAllowedLocalFile(inside.appendingPathComponent("../../../../../../../../etc/hosts")))
         #expect(!MediaLoader.isAllowedLocalFile(URL(string: "https://example.com/a.jpg")!))

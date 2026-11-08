@@ -113,6 +113,9 @@ extension ZaloEngine {
         for message in incoming {
             if let at = index[message.id] {
                 if list[at].date != message.date { needsSort = true }
+                if list[at].status != message.status || list[at].kind != message.kind {
+                    mediaResolver.forget(conversationId: convId, messageId: message.id)
+                }
                 list[at] = message
             } else {
                 if let last = list.last, message.date < last.date { needsSort = true }

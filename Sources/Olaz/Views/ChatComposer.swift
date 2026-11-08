@@ -44,7 +44,8 @@ struct ChatComposer: View {
         typingStickers.isVisible(draft: draft, mentionListOpen: suggestionsOpen, settingEnabled: StickerSuggestState.shared.setting?.enabled)
     }
 
-    private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var staged: [StagedImage] { engine.stagedImages[conversationId] ?? [] }
+    private var isEmpty: Bool { draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && staged.isEmpty }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -90,6 +91,14 @@ struct ChatComposer: View {
                 .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if !staged.isEmpty {
+                StagedImageStrip(
+                    images: staged,
+                    remove: { engine.removeStagedImage($0, in: conversationId) },
+                    clearAll: { engine.clearStagedImages(in: conversationId) }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if suggestionsOpen {
                 MentionSuggestions(candidates: candidates, selected: $selected, pick: pick)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -117,8 +126,10 @@ struct ChatComposer: View {
         .animation(.snappy(duration: 0.18), value: suggestionsOpen)
         .animation(.snappy(duration: 0.18), value: stickerStripOpen)
         .animation(.snappy(duration: 0.18), value: replyTo?.id)
+        .animation(.snappy(duration: 0.18), value: staged.map(\.id))
         .animation(.snappy(duration: 0.18), value: typingName)
         .animation(.snappy(duration: 0.18), value: uploadingCount > 0)
+        .onChange(of: staged.count) { old, now in if now > old { handle.focus() } }
         .onAppear {
             ComposerTextView.accent = NSColor(ChatPalette.accent(accentStored))
             handle.conversationId = conversationId
@@ -377,7 +388,12 @@ struct ChatComposer: View {
             if let fileURL = ZaloEngine.writeTemporaryPasteImage(imageData, prefix: isDrop ? "dropped-image" : "clipboard") {
                 if !isDrop { lastPasteGuard = (pasteboard.changeCount, Date().timeIntervalSinceReferenceDate) }
                 EngineLog.shared.write("pasteboard \(isDrop ? "drop" : "paste") → image(\(imageData.count)B)")
-                sendAttachments([fileURL], as: .media, to: targetConversationId)
+                if isDrop {
+                    sendAttachments([fileURL], as: .media, to: targetConversationId)
+                } else {
+                    engine.stageImageFile(fileURL, image: NSImage(data: imageData), in: targetConversationId)
+                    handle.focus()
+                }
                 return true
             }
             return false
@@ -611,6 +627,11 @@ final class ComposerHandle {
         tv.window?.makeFirstResponder(tv)
     }
 
+    func focus() {
+        guard let tv = textView else { return }
+        tv.window?.makeFirstResponder(tv)
+    }
+
     func insertPlainText(_ text: String) {
         guard let tv = textView, let storage = tv.textStorage else { return }
         let sel = tv.selectedRange()
@@ -623,6 +644,71 @@ final class ComposerHandle {
         tv.didChangeText()
         tv.setSelectedRange(NSRange(location: range.location + inserted.length, length: 0))
         tv.window?.makeFirstResponder(tv)
+    }
+}
+
+/// Inline preview strip inside `ChatComposer` for images pasted with ⌘V.
+struct StagedImageStrip: View {
+    let images: [StagedImage]
+    let remove: (UUID) -> Void
+    let clearAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.tint)
+                Text("Đính kèm \(images.count) ảnh")
+                    .font(.system(size: 11.5, weight: .semibold))
+                Text("• Nhấn Enter để gửi kèm tin nhắn")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button(images.count > 1 ? "Xóa tất cả" : "Xóa", systemImage: "xmark", action: clearAll)
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(images.count > 1 ? "Xóa tất cả ảnh đính kèm" : "Xóa ảnh đính kèm")
+            }
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(Array(images.enumerated()), id: \.element.id) { index, item in
+                        ZStack(alignment: .topTrailing) {
+                            Image(nsImage: item.image)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(width: 68, height: 68)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                                )
+                                .accessibilityLabel("Ảnh đính kèm \(index + 1)")
+                            Button {
+                                remove(item.id)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 15))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .black.opacity(0.65))
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 4, y: -4)
+                            .help("Bỏ ảnh này")
+                            .accessibilityLabel("Bỏ ảnh \(index + 1)")
+                        }
+                        .padding(.top, 4)
+                        .padding(.trailing, 4)
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

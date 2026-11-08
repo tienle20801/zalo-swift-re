@@ -382,6 +382,7 @@ final class ZaloMainProcess {
         }
         bridge.handle("exec", unsupported)
         bridge.handle("exec_raw", unsupported)
+        bridge.handle("verify_zalo_pc_hardlink_support") { _ in ["supported": true] }
 
         // $zperf.getCpuInfos → Electron app.getAppMetrics()
         bridge.handle("get-cpu-infos") { _ in

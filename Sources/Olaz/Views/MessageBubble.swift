@@ -400,7 +400,8 @@ struct MessageRow: View {
             VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
                 PhotoView(url: url, width: w, height: h, conversationId: message.conversationId, messageId: message.id,
                           senderName: mine ? "Bạn" : message.senderName, date: message.date,
-                          encrypted: message.isE2EE || url?.query?.contains("e2esession") == true)
+                          encrypted: message.isE2EE || url?.query?.contains("e2esession") == true,
+                          isSending: message.status == .sending)
                 caption
             }
         case .gif(let url):
@@ -704,6 +705,8 @@ struct PhotoView: View {
     let date: Date
     /// End-to-end encrypted photo: the CDN bytes are ciphertext, go through the official downloader.
     var encrypted = false
+    /// Outgoing photo still uploading: keep showing the loading spinner instead of a failure card.
+    var isSending = false
     /// Square thumbnail of this side (the inspector's media grid) instead of the chat size.
     var tile: CGFloat?
     /// Explicit gallery order (e.g. from the inspector / storage browser grid); nil uses the chat's loaded messages.
@@ -729,7 +732,14 @@ struct PhotoView: View {
         .resolvingWith(first: encrypted) { force in
             await engine.resolveMedia(conversationId: conversationId, messageId: messageId, kind: .photo, force: force)
         }
-        .onFailure { reason, retry in MediaFailureView(failure: reason, retry: retry) }
+        .onFailure { reason, retry in
+            if isSending {
+                Rectangle().fill(.quaternary).overlay { ProgressView().controlSize(.small) }
+                    .onDisappear { retry() }
+            } else {
+                MediaFailureView(failure: reason, compact: size.height < 110 || size.width < 140, retry: retry)
+            }
+        }
         .chatMediaBox(size, fixed: tile != nil)
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))

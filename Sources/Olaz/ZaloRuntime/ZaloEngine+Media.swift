@@ -59,6 +59,16 @@ final class MediaResolver {
     /// The remembered verdict for `key`, if any.
     func known(_ key: String) -> MediaResolution? { settled[key]?.resolution }
 
+    /// Clears any remembered `.unavailable` verdict for a message when its state/URL updates.
+    func forget(conversationId: String, messageId: String) {
+        for kind in [MediaKind.photo, .videoThumb, .video] {
+            let key = "\(conversationId)|\(messageId)|\(kind.rawValue)"
+            if let known = settled[key], known.resolution == .unavailable {
+                settled[key] = nil
+            }
+        }
+    }
+
     /// `force` (the retry button) ignores any remembered verdict except a final "expired": a remembered
     /// "unavailable" is retried, and a remembered file that turned out not to be loadable is looked up again.
     func resolve(key: String, force: Bool = false, run: @escaping @MainActor () async -> MediaResolution) async -> MediaResolution {

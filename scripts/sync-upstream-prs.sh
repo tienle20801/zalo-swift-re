@@ -20,7 +20,8 @@ git fetch upstream --prune
 
 echo ""
 echo "=== [2/2] Open Pull Requests on qnguyen3/zalo-swift-re ==="
-curl -s -H "Accept: application/vnd.github.v3+json" \
+curl -s -H "User-Agent: sync-upstream-prs" \
+    -H "Accept: application/vnd.github.v3+json" \
     "https://api.github.com/repos/qnguyen3/zalo-swift-re/pulls?state=open&per_page=20" | python3 -c '
 import sys, json, subprocess
 

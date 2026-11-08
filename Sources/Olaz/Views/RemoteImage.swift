@@ -133,8 +133,8 @@ struct RemoteImage<Placeholder: View>: View {
         if let cached = MediaLoader.cachedImage(for: url, maxPixelSize: maxPixelSize) {
             image = cached; isAnimated = false           // frame 0 now; may upgrade to animation below
             if !tryAnimated { return }
-        } else {
-            image = nil; isAnimated = false
+        } else if image == nil {
+            isAnimated = false
         }
         if tryAnimated {
             if let anim = await MediaLoader.shared.animatedImage(for: url), !Task.isCancelled {
@@ -164,7 +164,7 @@ struct RemoteImage<Placeholder: View>: View {
             }
         }
         guard !Task.isCancelled else { return }
-        failure = reason
+        if image == nil { failure = reason }
     }
 }
 
