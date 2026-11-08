@@ -154,6 +154,9 @@ struct ChatView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { markReadIfNeeded(last: engine.messages[id]?.last, newIncomingOnly: false) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            markReadIfNeeded(last: engine.messages[id]?.last, newIncomingOnly: false, appIsActive: true)
+        }
         // ⌘R: reply to the newest incoming message.
         .onChange(of: shell.replyTick) { _, _ in
             if let newest = engine.messages[id]?.last(where: { !$0.isMine && !$0.kind.isStandalone && $0.kind != .recalled }) { reply(newest) }
@@ -193,10 +196,11 @@ struct ChatView: View {
         return ""
     }
 
-    /// Marks read only when there is something unread: `unread > 0`, or an incoming
-    /// last message whose id has not been marked yet. Avoids redundant server round trips.
-    private func markReadIfNeeded(last: ChatMessage?, newIncomingOnly: Bool) {
-        guard scenePhase == .active, engine.openConversationId == id else { return }
+    /// Marks read only when the app is active in the foreground and there is something unread: `unread > 0`, or an incoming
+    /// last message whose id has not been marked yet. On macOS, `scenePhase` stays `.active` while the window is visible behind
+    /// another app, so `NSApp.isActive` is required to avoid marking messages read while Olaz is running in the background.
+    private func markReadIfNeeded(last: ChatMessage?, newIncomingOnly: Bool, appIsActive: Bool = NSApp.isActive) {
+        guard scenePhase == .active, appIsActive, engine.openConversationId == id else { return }
         if let last, !last.isMine, last.id != lastMarkedId, newIncomingOnly || conversation.unread > 0 {
             lastMarkedId = last.id
             engine.markRead(id)

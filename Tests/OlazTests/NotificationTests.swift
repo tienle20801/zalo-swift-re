@@ -186,4 +186,43 @@ import Foundation
         #expect(!fm.fileExists(atPath: oldFile.path))
         #expect(fm.fileExists(atPath: freshFile.path))
     }
+
+    @Test func notificationAdapterFocusAndActivitySync() {
+        let h = ScriptHarness(prelude: """
+        var events = [];
+        function EventTarget() {}
+        function HTMLMediaElement() {}
+        HTMLMediaElement.prototype.play = function () {};
+        function Event(type) { this.type = type; }
+        window.addEventListener = function () {};
+        window.dispatchEvent = function (e) { events.push('win:' + e.type); };
+        var document = { dispatchEvent: function (e) { events.push('doc:' + e.type); } };
+        window.ifvisible = {
+          idle: function () { events.push('ifv:idle'); },
+          wakeup: function () { events.push('ifv:wakeup'); }
+        };
+        window.webkit = { messageHandlers: {} };
+        """)
+        h.load("notification-adapter.js")
+        #expect(h.failures.isEmpty)
+
+        // When focused initially, activity() dispatches touchstart.
+        h.ctx.evaluateScript("window.__zaloNotification.activity();")
+        // When blurred, setFocused(false) puts ifvisible to idle, dispatches window blur, and blocks activity().
+        h.ctx.evaluateScript("window.__zaloNotification.setFocused(false);")
+        h.ctx.evaluateScript("window.__zaloNotification.activity();")
+        // When refocused, setFocused(true) wakes ifvisible, dispatches window focus, and allows activity() again.
+        h.ctx.evaluateScript("window.__zaloNotification.setFocused(true);")
+        h.ctx.evaluateScript("window.__zaloNotification.activity();")
+
+        let recorded = h.ctx.evaluateScript("events")?.toArray() as? [String]
+        #expect(recorded == [
+            "doc:touchstart",
+            "ifv:idle",
+            "win:blur",
+            "ifv:wakeup",
+            "win:focus",
+            "doc:touchstart",
+        ])
+    }
 }

@@ -199,6 +199,8 @@
   };
   const publishSoon = () => { setTimeout(() => publish(false), 60); setTimeout(() => publish(false), 250); setTimeout(() => publish(false), 1500); };
 
+  let appFocused = true;
+
   window.__zaloNotification = {
     setPermission(p) { permission = p === 'granted' || p === 'denied' ? p : 'default'; },
     permissionResult(p) {
@@ -243,9 +245,24 @@
       safe(() => S.storage && S.storage.removeCollapseBannerMuted(String(convId)), null);
       Promise.resolve(m.onUnMute(String(convId))).then(() => publishSoon(), (e) => diag('unmute failed: ' + (e && e.message || e)));
     },
+    // Synchronize the offscreen WKWebView's focus/idle state (`window.ifvisible` + DOM window focus/blur)
+    // with `NSApp.isActive` so `_notifyNewMessage` (`!this._isActive(convId)`) notifies when Olaz is in the background.
+    setFocused(active) {
+      appFocused = !!active;
+      try {
+        if (window.ifvisible) {
+          if (appFocused && typeof window.ifvisible.wakeup === 'function') window.ifvisible.wakeup();
+          else if (!appFocused && typeof window.ifvisible.idle === 'function') window.ifvisible.idle();
+        }
+        window.dispatchEvent(new Event(appFocused ? 'focus' : 'blur'));
+      } catch {}
+    },
     // Native user input in the SwiftUI window, forwarded as the DOM event the official activity
     // tracker (ifvisible) listens for, so "user is active in the app" matches the official client.
-    activity() { try { document.dispatchEvent(new Event('touchstart')); } catch {} },
+    activity() {
+      if (!appFocused) return;
+      try { document.dispatchEvent(new Event('touchstart')); } catch {}
+    },
   };
 
   const t = setInterval(() => { try { publish(false); } catch (e) { diag('publish failed: ' + e); } }, 1500);

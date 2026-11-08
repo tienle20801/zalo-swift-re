@@ -382,7 +382,7 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                if let id = self.engine?.openConversationId { self.clearDelivered(conversation: id) }
+                if NSApp.isActive, let id = self.engine?.openConversationId { self.clearDelivered(conversation: id) }
                 self.observeOpenConversation()
             }
         }
@@ -408,13 +408,19 @@ final class NativeNotifier: NSObject, UNUserNotificationCenterDelegate {
         sendFocus(NSApp.isActive)
     }
 
-    /// `webContents.send('visibility-change', 'focus'|'blur', windowId)` as Electron's main does for the main window.
+    /// `webContents.send('visibility-change', 'focus'|'blur')` as Electron's main does for the main window (`windowId` is
+    /// omitted so the main `FocusDetector` singleton — whose `this.windowId` is `undefined` — matches `n === this.windowId`).
     private func sendFocus(_ active: Bool) {
-        engine?.host?.bridge.send("visibility-change", active ? ["focus", "1"] : ["blur", "1"])
-        if active { Task { await engine?.refreshNotificationAuthorization() } }
+        engine?.host?.bridge.send("visibility-change", [active ? "focus" : "blur"])
+        engine?.callChat("setFocused", active, object: "__zaloNotification")
+        if active {
+            if let id = engine?.openConversationId { clearDelivered(conversation: id) }
+            Task { await engine?.refreshNotificationAuthorization() }
+        }
     }
 
     private func noteUserActivity() {
+        guard NSApp.isActive else { return }
         let now = Date()
         guard now.timeIntervalSince(lastActivityPush) >= 2 else { return }
         lastActivityPush = now

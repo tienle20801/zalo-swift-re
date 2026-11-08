@@ -250,7 +250,7 @@ final class ZaloMainProcess {
     func pageDidFinishLoading(_ page: OfficialClientHost.Page) {
         guard let bridge = host?.bridge else { return }
         bridge.send("visibility-change", ["show"])
-        bridge.send("visibility-change", NSApp.isActive ? ["focus", "1"] : ["blur", "1"])
+        bridge.send("visibility-change", [NSApp.isActive ? "focus" : "blur"])
         if page == .main, pushLoginSuccessAfterLoad {
             pushLoginSuccessAfterLoad = false
             bridge.send("login-success")
