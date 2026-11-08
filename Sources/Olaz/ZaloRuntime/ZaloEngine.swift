@@ -70,6 +70,8 @@ final class ZaloEngine {
 
     internal(set) var phase: Phase = .starting
     private(set) var conversations: [ConversationSummary] = []
+    /// `conversations` by id: the adapter posts only the rows that changed (`reset` replaces everything).
+    @ObservationIgnored private var conversationIndex: [String: ConversationSummary] = [:]
     private(set) var conversationsById: [String: ConversationSummary] = [:]
     private(set) var profile: Profile?
     /// Why the session ended, shown on the login screen (e.g. kicked by another PC login).
@@ -249,7 +251,7 @@ final class ZaloEngine {
             }
         }
         host.bridge.trace = { key, args in
-            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store") else { return }
+            guard !key.contains("ZLog"), !key.hasPrefix("$zelectron.store"), !key.hasPrefix("$olazSqlite") else { return }
             log.write("bridge \(key)\(EngineLog.shape(args))")
         }
         host.bridge.onHandlerError = { key, error in log.write("bridge-error \(key): \(error.localizedDescription)") }
@@ -277,11 +279,24 @@ final class ZaloEngine {
         host.load(.login, query: mainProcess.pageQuery())
     }
 
+    /// Where the official client keeps its databases (Settings ▸ Engine).
+    var storageBackend: ZaloMainProcess.StorageBackend? { mainProcess?.storage }
+
+    /// Moves this install to the native SQLite backend: the account is logged out and starts over on SQLite at the
+    /// next login (history comes back with the phone → PC sync).
+    func switchToSQLite() {
+        mainProcess?.switchStorage(.sqlite)
+        logOut()
+    }
+
     /// Clears the session cookies and local client data, then shows a fresh QR.
     func logOut() {
         ZaloMainProcess.clearCookies()
         mainProcess?.resetAccountState()
         profile = nil
+        conversations = []
+        conversationIndex = [:]
+        conversationsById = [:]
         resetConversationActions()
         resetCloud()
         resetPolls()
@@ -367,12 +382,7 @@ final class ZaloEngine {
         case "main" where state["chat"] != nil || state["typing"] != nil:
             handleChat(state: state)
         case "main" where state["conversations"] != nil:
-            let rows = state["conversations"] as? [[String: Any]] ?? []
-            let next = rows.compactMap(Self.conversation).sorted(by: Self.listOrder)
-            if conversations != next {
-                conversations = next
-                conversationsById = Dictionary(next.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            }
+            mergeConversations(state)
         case "main":
             if let user = state["user"] as? [String: Any], let id = user["userId"] as? String, !id.isEmpty {
                 profile = Profile(
@@ -544,6 +554,24 @@ final class ZaloEngine {
     private func log(_ line: String) {
         recentLog.append(line)
         if recentLog.count > 200 { recentLog.removeFirst(recentLog.count - 200) }
+    }
+
+    /// The conversation list arrives as deltas (state-adapter.js): `conversations` holds the rows that changed since the
+    /// last post, `removed` the ids that left the official index, `reset` (or the legacy full-list shape without it) replaces
+    /// the whole list. A large account has thousands of rows and some preview changes every tick: merging by id keeps the
+    /// bridge payload and the SwiftUI invalidation proportional to what changed.
+    private func mergeConversations(_ state: [String: Any]) {
+        let rows = (state["conversations"] as? [[String: Any]] ?? []).compactMap(Self.conversation)
+        let reset = state["reset"] as? Bool ?? (state["removed"] == nil)
+        let removed = state["removed"] as? [String] ?? []
+        var index = reset ? [:] : conversationIndex
+        for id in removed { index.removeValue(forKey: id) }
+        for row in rows { index[row.id] = row }
+        guard reset || index != conversationIndex else { return }
+        conversationIndex = index
+        let sorted = index.values.sorted(by: Self.listOrder)
+        if sorted != conversations { conversations = sorted }
+        conversationsById = index
     }
 
     private static func conversation(_ row: [String: Any]) -> ConversationSummary? {

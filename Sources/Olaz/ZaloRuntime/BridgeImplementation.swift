@@ -23,6 +23,12 @@ enum BridgeImplementation {
 
         mainProcess.install(on: bridge)
 
+        // Native SQLite behind the official DAL (sqlite-host.js); absent on the IndexedDB backend.
+        if let sqlite = mainProcess.sqlite {
+            sqlite.install(on: bridge)
+            bridge.value("$olazSqlite.__enabled", true)
+        }
+
         // electron-store backing for local-modules.js `getElectronStore`
         bridge.sync("$zelectron.storePath") { args in platform.storeURL(args.string(0) ?? "config").path }
         bridge.sync("$zelectron.storeRead") { args in platform.readStore(args.string(0) ?? "config") }

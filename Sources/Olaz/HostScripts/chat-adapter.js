@@ -156,7 +156,7 @@
       S.modulesLoading = true;
       Promise.all([S.io.getFriendManagerModule(), S.io.getGroupManagerModule()]).then(([f, g]) => {
         S.friends = f.default || f; S.groups = g.default || g;
-        track.nameRetries = 0; dirty = true; schedule();
+        track.nameRetries = 0; remapAll();
       }).catch((e) => { S.modulesLoading = false; diag('friend/group modules: ' + e); });
     }
     hookTyping();
@@ -793,54 +793,52 @@
     }, cardExtra || {});
   };
 
-  const msgCache = new WeakMap();
-  const sigByMapped = new WeakMap();
-  const mapAll = (list, convId, useCache) => {
+  // Maps the official messages of a conversation to rows (one per album photo). The result of a message is memoised by its
+  // official object: the Redux store replaces a message object when it changes, so a tick that only appends a message or
+  // updates one leaves every other object as it was, and mapping (card / menu description, params parsing, JSON signature)
+  // runs for the changed ones only. A store that updates a message in place is caught by `stamp` (the fields a status,
+  // star, reaction-count or sync change touches, plus the identity of the content / quote / mentions). Anything mapped from
+  // outside the message (names, avatars, pins, the conversation's own flags) comes with a `remapAll` flush (`all`: every
+  // message is mapped again), and a changed reaction drops the memo of its message (`invalidate`).
+  const mapMemo = new WeakMap();  // official message object → { stamp, rows: [{row, sig}] }
+  const stampOf = (m) => {
+    const list = Array.isArray(m.message) ? m.message : null;
+    const cli = String((m && m.cliMsgId) ?? '');
+    const localPath = (m && m.__olazLocalPath) || (cli && localPhotoByCliId.get(cli)) || '';
+    let s = `${m.msgId}|${m.cliMsgId}|${m.status}|${m.msgType}|${m.e2eeStatus}|${m.staredDttm}|${m.sendDttm}|${m.dName}|${m.ttl}|${m.fromUid}|${localPath}`;
+    if (list) for (const c of list) s += c && typeof c === 'object' ? `|${c.msgId}|${c.cliMsgId}|${c.status}|${c.staredDttm}` : '|';
+    return s;
+  };
+  const rowsOf = (m, convId) => {
+    const rows = [];
+    if (Number(m.msgType) === MSG.PHOTO_GROUP && Array.isArray(m.message)) {
+      const parentId = mapOne(m, convId).id;
+      m.message.forEach((child, i) => {
+        if (!child) return;
+        const c = Object.assign({}, m, child, { msgType: MSG.PHOTO, fromUid: child.fromUid ?? m.fromUid, status: child.status ?? m.status });
+        const j = mapOne(c, convId);
+        if (j.id === parentId || !(child.msgId || child.cliMsgId)) j.id = parentId + '#' + i;
+        rows.push(j);
+      });
+    } else {
+      const j = mapOne(m, convId);
+      if (j) rows.push(j);
+    }
+    return rows.map((row) => ({ row, sig: JSON.stringify(row) }));
+  };
+  // → [{row, sig}] in message order; `all` maps every message afresh.
+  const mapAll = (list, convId, all) => {
     const out = [];
     const seen = new Set();
-    const push = (j, sig) => {
-      if (!j || seen.has(j.id)) return;
-      seen.add(j.id);
-      if (sig) sigByMapped.set(j, sig);
-      out.push(j);
-    };
     for (const m of list) {
       if (!m || typeof m !== 'object') continue;
       try {
-      if (Number(m.msgType) === MSG.PHOTO_GROUP && Array.isArray(m.message)) {
-        const parentId = mapOne(m, convId).id;
-        m.message.forEach((child, i) => {
-          if (!child) return;
-          const c = Object.assign({}, m, child, { msgType: MSG.PHOTO, fromUid: child.fromUid ?? m.fromUid, status: child.status ?? m.status });
-          const j = mapOne(c, convId);
-          if (j.id === parentId || !(child.msgId || child.cliMsgId)) j.id = parentId + '#' + i;
-          push(j);
-        });
-        continue;
-      }
-      const reactRec = reactionsById.get(String(m.msgId || ''));
-      const mo = m.message && typeof m.message === 'object' && !Array.isArray(m.message) ? m.message : null;
-      const mUrl = mo ? str(mo.normalUrl || mo.hdUrl || mo.oriUrl || mo.thumbUrl || mo.href || mo.thumb) : '';
-      const mParams = mo ? str(mo.params) : '';
-      if (useCache) {
-        const hit = msgCache.get(m);
-        if (hit && hit.convId === convId && hit.status === m.status && hit.msgId === m.msgId
-          && hit.cliMsgId === m.cliMsgId && hit.message === m.message && hit.mUrl === mUrl && hit.mParams === mParams
-          && hit.sendDttm === m.sendDttm && hit.starred === m.starred && hit.e2eeStatus === m.e2eeStatus && hit.reactRec === reactRec
-          && (hit.mapped.isMine || (hit.mapped.senderName && hit.mapped.senderAvatar))) {
-          push(hit.mapped, hit.sig);
-          continue;
-        }
-      }
-      const j = mapOne(m, convId);
-      if (j) {
-        const sig = JSON.stringify(j);
-        msgCache.set(m, {
-          convId, status: m.status, msgId: m.msgId, cliMsgId: m.cliMsgId, message: m.message, mUrl, mParams,
-          sendDttm: m.sendDttm, starred: m.starred, e2eeStatus: m.e2eeStatus, reactRec, mapped: j, sig
-        });
-        push(j, sig);
-      }
+        const stamp = stampOf(m);
+        const hit = all ? null : mapMemo.get(m);
+        let rows;
+        if (hit && hit.stamp === stamp && hit.convId === convId && hit.contents === m.message && hit.quote === m.quote && hit.mentions === m.mentions) rows = hit.rows;
+        else { rows = rowsOf(m, convId); mapMemo.set(m, { stamp, convId, contents: m.message, quote: m.quote, mentions: m.mentions, rows }); }
+        for (const r of rows) { if (seen.has(r.row.id)) continue; seen.add(r.row.id); out.push(r); }
       } catch (e) { diag('mapOne ' + scrubErr(e)); } // one bad message must not stall the conversation
     }
     return out;
@@ -859,7 +857,7 @@
     for (const rec of recs) for (const uid of reactorTable(rec).keys()) if (!isMeUid(uid) && !profileTried.has(uid)) { profileTried.add(uid); uids.push(uid); }
     if (!uids.length) return;
     if (profileTried.size > 5000) profileTried.clear();
-    ensureProfiles(uids).then((changed) => { if (changed) { dirty = true; schedule(); } }).catch(() => {});
+    ensureProfiles(uids).then((changed) => { if (changed) remapAll(); }).catch(() => {});
   };
   const hookReactions = () => {
     if (hookedReactions || !S.reactCache) return;
@@ -867,9 +865,13 @@
     S.reactCache.addUpdateReactListener((rec) => {
       const r = (Array.isArray(rec) ? rec : [rec]).filter((x) => x && x.rMsgId);
       if (reactionsById.size > 5000) resetReactionCache();
-      for (const x of r) reactionsById.set(String(x.rMsgId), x);
+      const ids = [];
+      for (const x of r) {
+        reactionsById.set(String(x.rMsgId), x);
+        if (track.serverIds && track.serverIds.has(String(x.rMsgId))) ids.push(String(x.rMsgId));
+      }
       warmReactors(r);
-      dirty = true; schedule();
+      if (ids.length) { invalidate(ids); dirty = true; schedule(); }
     });
   };
   // A photo group is reacted per photo: the official reactions are keyed by each child's msgId.
@@ -885,9 +887,10 @@
     Promise.resolve(S.reactCache.getMessageReactions(todo)).then((res) => {
       if (reactionsById.size > 5000) resetReactionCache();
       const recs = [];
-      for (const [id, rec] of Object.entries(res || {})) if (rec) { reactionsById.set(String(id), rec); recs.push(rec); }
+      const ids = [];
+      for (const [id, rec] of Object.entries(res || {})) if (rec) { reactionsById.set(String(id), rec); recs.push(rec); ids.push(String(id)); }
       warmReactors(recs);
-      dirty = true; schedule();
+      if (ids.length) { invalidate(ids); dirty = true; schedule(); }
     }).catch((e) => { todo.forEach((id) => reactionFetched.delete(id)); diag('reactions: ' + scrubErr(e)); });
   };
 
@@ -922,8 +925,18 @@
   };
 
   // ---- state publishing ----
-  const track = { id: null, lastMessages: null, lastList: null, sigs: new Map(), exhausted: false, lastHasMore: null, noGrowth: 0, nameRetries: 0, needsNames: false };
+  const track = { id: null, lastMessages: null, lastList: null, sigs: new Map(), exhausted: false, lastHasMore: null, noGrowth: 0, nameRetries: 0, needsNames: false, reactionScan: null, serverIds: new Set(), fullAt: 0 };
   let dirty = false, timer = null, timerDue = 0, timerSeq = 0, forceReset = false;
+  // `dirty`: a flush is due (the memoised rows stay valid); `remap`: every message is mapped again (state outside the
+  // messages changed: names, pins, the conversation's flags).
+  let remap = false;
+  const FULL_MAP_MS = 10000;
+  const remapAll = () => { dirty = true; remap = true; schedule(); };
+  // Drops the memoised rows of the loaded messages with these server ids (their reactions changed).
+  const invalidate = (ids) => {
+    const want = new Set(ids);
+    for (const m of track.lastMessages || []) if (m && reactionIdsOf(m).some((sid) => want.has(sid))) mapMemo.delete(m);
+  };
   let openSeq = 0, openingId = null;
   const hasMoreOf = (conv) => {
     if (track.exhausted) return false;
@@ -932,7 +945,7 @@
   };
   const schedule = (ms) => {
     if (!track.id) return;
-    const delay = typeof ms === 'number' ? ms : 40, due = Date.now() + delay;
+    const delay = typeof ms === 'number' ? ms : 150, due = Date.now() + delay;
     if (timer && timerDue <= due) return;
     if (timer) clearTimeout(timer);
     timerDue = due;
@@ -951,16 +964,27 @@
     // An empty list while the official load is still in flight is not the truth yet; don't clear the UI.
     if (forceReset && !messages.length && openingId === id) return;
     if (!dirty && !forceReset && messages === track.lastMessages && conv.msgList === track.lastList) return;
-    const useCache = !dirty && !forceReset;
-    dirty = false;
+    // Everything is mapped again on an explicit refresh, and at least every FULL_MAP_MS on a tick, so what a card or a
+    // name shows from state outside the message (a friend request accepted elsewhere, a renamed contact) catches up.
+    const now = Date.now();
+    const all = remap || forceReset || now - track.fullAt > FULL_MAP_MS;
+    if (all) track.fullAt = now;
+    dirty = false; remap = false;
     track.lastMessages = messages; track.lastList = conv.msgList;
-    fetchReactions(messages.flatMap(reactionIdsOf));
-    const mapped = mapAll(messages, id, useCache);
+    if (messages !== track.reactionScan) {
+      // Reactions are fetched once per message id (`reactionFetched`): only ids not seen before cost anything.
+      track.reactionScan = messages;
+      const ids = messages.flatMap(reactionIdsOf);
+      track.serverIds = new Set(ids);
+      fetchReactions(ids);
+    }
+    const entries = mapAll(messages, id, all);
+    const mapped = entries.map((e) => e.row);
     track.needsNames = mapped.some((j) => !j.isMine && (!j.senderName || !j.senderAvatar));
     const hasMore = hasMoreOf(conv);
     if (forceReset) {
       forceReset = false;
-      track.sigs = new Map(mapped.map((j) => [j.id, sigByMapped.get(j) || JSON.stringify(j)]));
+      track.sigs = new Map(entries.map((e) => [e.row.id, e.sig]));
       track.lastHasMore = hasMore;
       track.lastRaw = messages.length;
       post({ page: 'main', chat: { convId: id, messages: mapped, removed: [], hasMore, reset: true } });
@@ -968,10 +992,9 @@
     }
     const next = new Map();
     const changed = [];
-    for (const j of mapped) {
-      const sig = sigByMapped.get(j) || JSON.stringify(j);
-      next.set(j.id, sig);
-      if (track.sigs.get(j.id) !== sig) changed.push(j);
+    for (const e of entries) {
+      next.set(e.row.id, e.sig);
+      if (track.sigs.get(e.row.id) !== e.sig) changed.push(e.row);
     }
     const removed = [...track.sigs.keys()].filter((k) => !next.has(k));
     track.sigs = next;
@@ -996,7 +1019,7 @@
     });
     // Names/avatars can arrive after messages: re-check only while some are missing, a bounded number of times.
     setInterval(() => {
-      if (track.id && track.needsNames && track.nameRetries < 10) { track.nameRetries++; dirty = true; schedule(100); }
+      if (track.id && track.needsNames && track.nameRetries < 10) { track.nameRetries++; remapAll(); }
     }, 2500);
   };
 
@@ -1096,7 +1119,7 @@
     sendChain = run.catch(() => {});
     return run;
   };
-  const refresh = () => { dirty = true; schedule(25); };
+  const refresh = () => remapAll();
 
   // Official ZTagNameHelper registry (found once in the module cache); SRC_GET_PROFILE comes from `scanModules`.
   let tagRegistry = null;
@@ -1306,7 +1329,7 @@
       if (track.id && switched) deactivate(track.id);
       if (switched) { reactionsById.clear(); reactionFetched.clear(); }
       track.id = convId; track.exhausted = false; track.noGrowth = 0; track.nameRetries = 0; track.needsNames = false;
-      track.lastMessages = null; track.lastList = null; track.sigs = new Map();
+      track.lastMessages = null; track.lastList = null; track.sigs = new Map(); track.reactionScan = null; track.serverIds = new Set();
       forceReset = true; dirty = true;
       flushNow();
       try {
@@ -1323,7 +1346,7 @@
         // The chat view marks its loader active so the official in-memory message cache follows the conversation.
         safe(() => S.loader.cacheMessageLoader.get(convId).active(), null);
       } catch (e) { diag('open ' + (e && e.message || e)); }
-      if (!stale()) { openingId = null; dirty = true; flushNow(); }
+      if (!stale()) { openingId = null; remapAll(); }
     },
     async close(convId) {
       convId = String(convId);
@@ -1407,7 +1430,7 @@
         if (!fetched && !reactionsById.has(sid)) return null;
         const table = reactorTable(reactionsById.get(sid));
         if (!table.size) return { tabs: [], users: [] };
-        if (await ensureProfiles([...table.keys()].filter((uid) => !isMeUid(uid)))) { dirty = true; schedule(); }
+        if (await ensureProfiles([...table.keys()].filter((uid) => !isMeUid(uid)))) remapAll();
         const tabs = new Map();           // rType → {…icon, total}
         const users = [];
         for (const [uid, row] of table) {
