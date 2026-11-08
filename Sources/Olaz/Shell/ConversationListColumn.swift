@@ -77,20 +77,37 @@ struct ConversationListColumn: View {
         if destination == .hidden {
             return (shell.unlockedHiddenIds ?? []).compactMap { lookup[$0] }.map(ListItem.conversation)
         }
-        // Hidden chats are removed in every mode (the controller may still list one right after a local hide).
-        if !extras.loaded {
-            return all.filter { !engine.conversationActions.isHidden($0.id) }.map(ListItem.conversation)
-        }
         let visibleById: (String) -> ZaloEngine.ConversationSummary? = { id in
             guard !engine.conversationActions.isHidden(id) else { return nil }
             return lookup[id]
+        }
+        // Hidden chats are removed in every mode. Before extras has loaded or while listIds is empty,
+        // filter appropriately per destination so "Khác" (archived) chats never leak into the main inbox.
+        if !extras.loaded || extras.listIds.isEmpty {
+            let notHidden = all.filter { !engine.conversationActions.isHidden($0.id) }
+            switch destination {
+            case .other:
+                return notHidden.filter { engine.conversationActions.flags(for: $0.id).contains(.archived) }.map(ListItem.conversation)
+            case .unread:
+                return notHidden.filter { $0.unread > 0 || engine.conversationActions.hasUnreadMark($0.id) }.map(ListItem.conversation)
+            case .strangers:
+                return extras.strangerFolderIds.compactMap(visibleById).map(ListItem.conversation)
+            case .inbox, .myCloud, .label:
+                return notHidden.filter { !engine.conversationActions.flags(for: $0.id).contains(.archived) }.map(ListItem.conversation)
+            default:
+                return notHidden.map(ListItem.conversation)
+            }
         }
         if destination == .strangers {
             return extras.strangerFolderIds.compactMap(visibleById).map(ListItem.conversation)
         }
         return extras.listIds.compactMap { id -> ListItem? in
             if id == ConversationExtras.strangerBoxId { return extras.strangerBox.chats > 0 ? .strangerBox : nil }
-            return visibleById(id).map(ListItem.conversation)
+            guard let conv = visibleById(id) else { return nil }
+            if destination == .inbox && engine.conversationActions.flags(for: conv.id).contains(.archived) {
+                return nil
+            }
+            return .conversation(conv)
         }
     }
 

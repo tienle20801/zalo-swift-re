@@ -570,14 +570,20 @@ final class ZaloEngine {
     /// last post, `removed` the ids that left the official index, `reset` (or the legacy full-list shape without it) replaces
     /// the whole list. A large account has thousands of rows and some preview changes every tick: merging by id keeps the
     /// bridge payload and the SwiftUI invalidation proportional to what changed.
-    private func mergeConversations(_ state: [String: Any]) {
+    internal func mergeConversations(_ state: [String: Any]) {
         let rows = (state["conversations"] as? [[String: Any]] ?? []).compactMap(Self.conversation)
         let reset = state["reset"] as? Bool ?? (state["removed"] == nil)
         let removed = state["removed"] as? [String] ?? []
-        var index = reset ? [:] : conversationIndex
+        // Non-destructive merge: if WebKit sends reset: true but rows is empty while the engine holds cached
+        // conversations from snapshot, do not wipe the index!
+        let shouldReset = reset && !rows.isEmpty && (conversationIndex.isEmpty || rows.count >= max(5, conversationIndex.count / 2))
+        if reset && !shouldReset && !conversationIndex.isEmpty {
+            EngineLog.shared.write("mergeConversations: ignored premature empty reset (\(rows.count) rows) while holding \(conversationIndex.count) cached conversations")
+        }
+        var index = shouldReset ? [:] : conversationIndex
         for id in removed { index.removeValue(forKey: id) }
         for row in rows { index[row.id] = row }
-        guard reset || index != conversationIndex else { return }
+        guard shouldReset || index != conversationIndex else { return }
         conversationIndex = index
         let sorted = index.values.sorted(by: Self.listOrder)
         if sorted != conversations { conversations = sorted }
@@ -644,9 +650,10 @@ final class ZaloEngine {
         }
     }
 
-    private func restoreConversationSnapshot() {
-        guard let platform else { return }
-        guard let snapshot = ConversationSnapshotStore.load(platform: platform) else { return }
+    internal func restoreConversationSnapshot(platform: ZaloPlatform? = nil) {
+        let p = platform ?? self.platform
+        guard let p else { return }
+        guard let snapshot = ConversationSnapshotStore.load(platform: p) else { return }
         if let currentUid = profile?.userId, let snapUid = snapshot.userId, currentUid != snapUid {
             return
         }

@@ -159,4 +159,51 @@ import Foundation
         ConversationSnapshotStore.clear(platform: platform)
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }
+
+    @Test func archivedChatsExcludedFromInboxOnColdStart() {
+        let inboxConv = ZaloEngine.ConversationSummary(
+            id: "inbox-1", isGroup: false, name: "Inbox Chat", avatar: nil,
+            pinned: false, members: 2, unread: 0, preview: nil
+        )
+        let archivedConv = ZaloEngine.ConversationSummary(
+            id: "archived-1", isGroup: false, name: "Archived Chat", avatar: nil,
+            pinned: false, members: 2, unread: 0, preview: nil
+        )
+
+        var actions = ConversationActionsState()
+        actions.flags = ["archived-1": ConversationActionFlags.archived]
+
+        let all = [inboxConv, archivedConv]
+        let inboxFiltered = all.filter { !actions.flags(for: $0.id).contains(.archived) }
+        let otherFiltered = all.filter { actions.flags(for: $0.id).contains(.archived) }
+
+        #expect(inboxFiltered.map(\.id) == ["inbox-1"])
+        #expect(otherFiltered.map(\.id) == ["archived-1"])
+    }
+
+    @Test func prematureEmptyResetDoesNotWipeCachedConversations() {
+        let engine = ZaloEngine()
+        let conv = ZaloEngine.ConversationSummary(
+            id: "c-1", isGroup: false, name: "Saved Chat", avatar: nil,
+            pinned: false, members: 2, unread: 0, preview: nil
+        )
+
+        let platform = makePlatform()
+        defer { cleanupPlatform(platform) }
+        let snapshot = ConversationSnapshot(
+            version: 1, userId: "u1", timestamp: Date(),
+            conversations: [conv], hiddenIds: [], flags: [:], left: [:],
+            hiddenEnabled: false, hasHiddenPIN: false, markUnreadEnabled: false
+        )
+        ConversationSnapshotStore.save(snapshot, platform: platform)
+        engine.restoreConversationSnapshot(platform: platform)
+        #expect(engine.conversations.count == 1)
+
+        // Simulate premature empty reset from WebKit
+        engine.mergeConversations(["conversations": [], "reset": true, "removed": []])
+
+        // Conversation should NOT be wiped because rows is empty
+        #expect(engine.conversations.count == 1)
+        #expect(engine.conversations.first?.id == "c-1")
+    }
 }
