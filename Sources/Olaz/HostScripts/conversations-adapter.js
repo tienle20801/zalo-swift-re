@@ -80,6 +80,9 @@
     const labels = (cache || safe(() => c.labelDataManager.getAllLabels(), []))
       .filter(Boolean).slice().sort((a, b) => (a.offset || 0) - (b.offset || 0))
       .map((l) => ({ id: String(l.id), name: String(l.text || ''), color: String(l.color || ''), emoji: String(l.emoji || ''), convIds: (l.conversations || []).map(String) }));
+    if (c.isEnableArchivedChat && c.typeFilter === FILTER.ALL && (!c.labelFilters || c.labelFilters.length === 0)) {
+      try { c.onTypeFilterChange(FILTER.FOCUSED); } catch {}
+    }
     const type = Number(c.typeFilter), labelIds = (c.labelFilters || []).map(String);
     const list = type === FILTER.ALL && labelIds.length === 0 ? c.listVisible : c.listFiltered;
     const strangers = (c.listStrangers || []).map(String);

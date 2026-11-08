@@ -81,9 +81,17 @@ struct ConversationListColumn: View {
             guard !engine.conversationActions.isHidden(id) else { return nil }
             return lookup[id]
         }
-        // Hidden chats are removed in every mode. Before extras has loaded or while listIds is empty,
-        // filter appropriately per destination so "Khác" (archived) chats never leak into the main inbox.
-        if !extras.loaded || extras.listIds.isEmpty {
+        // If listIds only contains pinned items (or very few items) while engine holds many conversations,
+        // WebKit's listFiltered hasn't completed loading the non-pinned rows yet.
+        let nonPinnedInList = extras.listIds.filter { id in
+            id != ConversationExtras.strangerBoxId && !engine.conversationActions.isPinned(id)
+        }
+        let isPrematureShortList = (destination == .inbox && nonPinnedInList.isEmpty && all.count > 5)
+
+        // Hidden chats are removed in every mode. Before extras has loaded or while listIds is empty
+        // (or prematurely only containing pins), filter appropriately per destination so "Khác" (archived)
+        // chats and strangers never leak into the main inbox.
+        if !extras.loaded || extras.listIds.isEmpty || isPrematureShortList {
             let notHidden = all.filter { !engine.conversationActions.isHidden($0.id) }
             switch destination {
             case .other:
@@ -93,7 +101,10 @@ struct ConversationListColumn: View {
             case .strangers:
                 return extras.strangerFolderIds.compactMap(visibleById).map(ListItem.conversation)
             case .inbox, .myCloud, .label:
-                return notHidden.filter { !engine.conversationActions.flags(for: $0.id).contains(.archived) }.map(ListItem.conversation)
+                return notHidden.filter {
+                    !engine.conversationActions.flags(for: $0.id).contains(.archived) &&
+                    !extras.strangerFolderIds.contains($0.id)
+                }.map(ListItem.conversation)
             default:
                 return notHidden.map(ListItem.conversation)
             }
@@ -104,7 +115,7 @@ struct ConversationListColumn: View {
         return extras.listIds.compactMap { id -> ListItem? in
             if id == ConversationExtras.strangerBoxId { return extras.strangerBox.chats > 0 ? .strangerBox : nil }
             guard let conv = visibleById(id) else { return nil }
-            if destination == .inbox && engine.conversationActions.flags(for: conv.id).contains(.archived) {
+            if destination == .inbox && (engine.conversationActions.flags(for: conv.id).contains(.archived) || extras.strangerFolderIds.contains(conv.id)) {
                 return nil
             }
             return .conversation(conv)

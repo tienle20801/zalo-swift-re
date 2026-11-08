@@ -121,6 +121,28 @@ struct ConversationActionsState: Equatable {
         for (id, value) in rawFlags {
             if let bits = (value as? NSNumber)?.intValue, bits != 0 { next[id] = ConversationActionFlags(rawValue: bits) }
         }
+
+        // Non-destructive preservation of .pinned and .archived flags:
+        // During startup WebKit may publish an early flags dictionary before its IndexedDB stores
+        // (X.archive.listArchivedChat, PinDataManager) have finished loading.
+        // If we already hold flags from snapshot or a prior full sync that contain .pinned or .archived,
+        // do not wipe them if the incoming next payload contains 0 of those flags.
+        let currentHasPinned = flags.values.contains { $0.contains(.pinned) }
+        let nextHasPinned = next.values.contains { $0.contains(.pinned) }
+        let currentHasArchived = flags.values.contains { $0.contains(.archived) }
+        let nextHasArchived = next.values.contains { $0.contains(.archived) }
+
+        if currentHasPinned && !nextHasPinned {
+            for (id, f) in flags where f.contains(.pinned) {
+                next[id, default: []].insert(.pinned)
+            }
+        }
+        if currentHasArchived && !nextHasArchived {
+            for (id, f) in flags where f.contains(.archived) {
+                next[id, default: []].insert(.archived)
+            }
+        }
+
         flags = next
         var leaves: [String: ConversationLeaveType] = [:]
         for (id, value) in json["left"] as? [String: Any] ?? [:] {

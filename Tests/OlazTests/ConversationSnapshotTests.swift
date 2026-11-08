@@ -206,4 +206,145 @@ import Foundation
         #expect(engine.conversations.count == 1)
         #expect(engine.conversations.first?.id == "c-1")
     }
+
+    @Test func v2SnapshotRoundTripAndBackwardsCompatibility() throws {
+        let platform = makePlatform()
+        defer { cleanupPlatform(platform) }
+
+        let original = ConversationSnapshot(
+            version: 2,
+            userId: "uid-me",
+            timestamp: Date(),
+            conversations: [],
+            hiddenIds: [],
+            flags: [:],
+            left: [:],
+            hiddenEnabled: true,
+            hasHiddenPIN: false,
+            markUnreadEnabled: true,
+            selfConversationId: "self-cloud-id",
+            displayName: "Test User",
+            avatar: URL(string: "https://example.com/me.png"),
+            archivedEnabled: true,
+            listIds: ["c1", "c2"],
+            strangerIds: ["s1"],
+            strangerFolderIds: ["s1"]
+        )
+
+        ConversationSnapshotStore.save(original, platform: platform)
+        let loaded = try #require(ConversationSnapshotStore.load(platform: platform))
+        #expect(loaded.version == 2)
+        #expect(loaded.selfConversationId == "self-cloud-id")
+        #expect(loaded.displayName == "Test User")
+        #expect(loaded.avatar == URL(string: "https://example.com/me.png"))
+        #expect(loaded.archivedEnabled == true)
+        #expect(loaded.listIds == ["c1", "c2"])
+        #expect(loaded.strangerFolderIds == ["s1"])
+
+        // Backwards compatibility with v1 JSON (no v2 keys)
+        let v1JSON = """
+        {
+            "version": 1,
+            "userId": "uid-v1",
+            "timestamp": 1700000000,
+            "conversations": [],
+            "hiddenIds": [],
+            "flags": {},
+            "left": {},
+            "hiddenEnabled": false,
+            "hasHiddenPIN": false,
+            "markUnreadEnabled": false
+        }
+        """.data(using: .utf8)!
+
+        let decodedV1 = try JSONDecoder().decode(ConversationSnapshot.self, from: v1JSON)
+        #expect(decodedV1.version == 1)
+        #expect(decodedV1.selfConversationId == nil)
+        #expect(decodedV1.displayName == nil)
+        #expect(decodedV1.archivedEnabled == false)
+        #expect(decodedV1.listIds.isEmpty)
+    }
+
+    @Test func flagsPreservationOnIncompleteWebKitUpdate() {
+        var actions = ConversationActionsState()
+        let snapshot = ConversationSnapshot(
+            version: 2,
+            userId: "u1",
+            timestamp: Date(),
+            conversations: [],
+            hiddenIds: [],
+            flags: [
+                "p1": ConversationActionFlags.pinned.rawValue,
+                "a1": ConversationActionFlags.archived.rawValue
+            ],
+            left: [:],
+            hiddenEnabled: true,
+            hasHiddenPIN: false,
+            markUnreadEnabled: true
+        )
+
+        actions.restore(from: snapshot)
+        #expect(actions.isPinned("p1"))
+        #expect(actions.flags(for: "a1").contains(.archived))
+
+        // WebKit sends premature early flags before loading Pin/Archive store (0 pinned, 0 archived)
+        actions.apply(json: [
+            "flags": [
+                "some-oa": 8 // cannotPin
+            ]
+        ])
+
+        // Pinned and archived flags must be preserved!
+        #expect(actions.isPinned("p1"))
+        #expect(actions.flags(for: "a1").contains(.archived))
+        #expect(actions.flags(for: "some-oa").contains(.cannotPin))
+
+        // When WebKit actually sends full flags containing pins and archives, it updates
+        actions.apply(json: [
+            "flags": [
+                "p2": ConversationActionFlags.pinned.rawValue,
+                "a2": ConversationActionFlags.archived.rawValue
+            ]
+        ])
+        #expect(!actions.isPinned("p1"))
+        #expect(actions.isPinned("p2"))
+        #expect(!actions.flags(for: "a1").contains(.archived))
+        #expect(actions.flags(for: "a2").contains(.archived))
+    }
+
+    @Test func engineRestoresExtrasAndProfileFromSnapshot() {
+        let engine = ZaloEngine()
+        let platform = makePlatform()
+        defer { cleanupPlatform(platform) }
+
+        let snapshot = ConversationSnapshot(
+            version: 2,
+            userId: "user-abc",
+            timestamp: Date(),
+            conversations: [],
+            hiddenIds: [],
+            flags: [:],
+            left: [:],
+            hiddenEnabled: true,
+            hasHiddenPIN: false,
+            markUnreadEnabled: true,
+            selfConversationId: "cloud-conv-id",
+            displayName: "Test User",
+            avatar: nil,
+            archivedEnabled: true,
+            listIds: ["conv-focus-1"],
+            strangerIds: ["stranger-1"],
+            strangerFolderIds: ["stranger-1"]
+        )
+
+        ConversationSnapshotStore.save(snapshot, platform: platform)
+        engine.restoreConversationSnapshot(platform: platform)
+
+        #expect(engine.selfConversationId == "cloud-conv-id")
+        #expect(engine.profile?.displayName == "Test User")
+        #expect(engine.conversationExtras.archivedEnabled == true)
+        #expect(engine.conversationExtras.listIds == ["conv-focus-1"])
+        #expect(engine.conversationExtras.strangerFolderIds == ["stranger-1"])
+        #expect(engine.conversationExtras.loaded == true)
+    }
 }

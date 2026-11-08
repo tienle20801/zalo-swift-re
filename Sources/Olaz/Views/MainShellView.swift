@@ -41,6 +41,7 @@ struct MainShellView: View {
             if !destination.isConversationList { shell.hideInspector() }
         }
         .onChange(of: engine.conversationExtras.loaded) { _, _ in applyOfficialFilter(shell.destination) }
+        .onChange(of: engine.conversationExtras.archivedEnabled) { _, _ in applyOfficialFilter(shell.destination) }
         // A label deleted here or on another device takes its list with it.
         .onChange(of: engine.conversationExtras.labels.map(\.id)) { _, ids in
             if case .label(let id) = shell.destination, engine.conversationExtras.loaded, !ids.contains(id) { shell.destination = .inbox }

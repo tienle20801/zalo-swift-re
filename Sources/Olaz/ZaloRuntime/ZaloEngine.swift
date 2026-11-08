@@ -271,7 +271,8 @@ final class ZaloEngine {
         if mainProcess.hasSession {
             restoreConversationSnapshot()
         }
-        phase = mainProcess.hasSession ? .signingIn : .login(LoginState())
+        let hasInstantUI = !conversations.isEmpty && conversationActions.hiddenKnown
+        phase = mainProcess.hasSession ? (hasInstantUI ? .ready : .signingIn) : .login(LoginState())
         mainProcess.start()
     }
 
@@ -369,6 +370,7 @@ final class ZaloEngine {
             scheduleSnapshotSave()
         case "main" where state["conversationExtras"] != nil:
             handleConversationExtras(state: state)
+            scheduleSnapshotSave()
         case "main" where state["zcloud"] != nil:
             handleCloud(state: state)
         case "main" where state["poll"] != nil:
@@ -635,7 +637,7 @@ final class ZaloEngine {
                 leftStrings[id] = leave.rawValue
             }
             let snapshot = ConversationSnapshot(
-                version: 1,
+                version: ConversationSnapshot.currentVersion,
                 userId: self.profile?.userId,
                 timestamp: Date(),
                 conversations: Array(self.conversations.prefix(300)),
@@ -644,7 +646,14 @@ final class ZaloEngine {
                 left: leftStrings,
                 hiddenEnabled: self.conversationActions.hiddenEnabled,
                 hasHiddenPIN: self.conversationActions.hasHiddenPIN,
-                markUnreadEnabled: self.conversationActions.markUnreadEnabled
+                markUnreadEnabled: self.conversationActions.markUnreadEnabled,
+                selfConversationId: self.selfConversationId,
+                displayName: self.profile?.displayName,
+                avatar: self.profile?.avatar,
+                archivedEnabled: self.conversationExtras.archivedEnabled,
+                listIds: self.conversationExtras.listIds,
+                strangerIds: Array(self.conversationExtras.strangerIds),
+                strangerFolderIds: self.conversationExtras.strangerFolderIds
             )
             ConversationSnapshotStore.save(snapshot, platform: platform)
         }
@@ -665,7 +674,25 @@ final class ZaloEngine {
         conversationIndex = index
         conversationsById = index
         conversations = snapshot.conversations
-        EngineLog.shared.write("snapshot: restored \(snapshot.conversations.count) conversations, \(snapshot.hiddenIds.count) hidden")
+
+        // 3. Restore self conversation ID & profile
+        if let selfId = snapshot.selfConversationId, !selfId.isEmpty {
+            selfConversationId = selfId
+        }
+        if let name = snapshot.displayName, !name.isEmpty {
+            profile = Profile(userId: snapshot.userId ?? "", displayName: name, avatar: snapshot.avatar, phone: nil)
+        }
+
+        // 4. Restore extras (archivedEnabled, listIds, strangerFolderIds)
+        if snapshot.archivedEnabled || !snapshot.listIds.isEmpty {
+            conversationExtras.archivedEnabled = snapshot.archivedEnabled
+            conversationExtras.listIds = snapshot.listIds
+            conversationExtras.strangerIds = Set(snapshot.strangerIds)
+            conversationExtras.strangerFolderIds = snapshot.strangerFolderIds
+            conversationExtras.loaded = true
+        }
+
+        EngineLog.shared.write("snapshot: restored \(snapshot.conversations.count) conversations, \(snapshot.hiddenIds.count) hidden, \(snapshot.flags.count) flags, archived=\(snapshot.archivedEnabled), listIds=\(snapshot.listIds.count)")
     }
 
     static func decodeDataURL(_ url: String) -> Data? {
