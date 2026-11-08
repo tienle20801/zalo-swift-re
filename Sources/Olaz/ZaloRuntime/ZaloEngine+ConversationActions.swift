@@ -129,6 +129,28 @@ struct ConversationActionsState: Equatable {
         left = leaves
         markUnreadEnabled = (json["markUnread"] as? NSNumber)?.boolValue ?? false
     }
+
+    /// Restores the conversation actions, flags, and hidden chat IDs from an encrypted on-disk snapshot.
+    mutating func restore(from snapshot: ConversationSnapshot) {
+        hiddenKnown = true
+        hiddenEnabled = snapshot.hiddenEnabled
+        hasHiddenPIN = snapshot.hasHiddenPIN
+        hiddenIds = Set(snapshot.hiddenIds)
+        markUnreadEnabled = snapshot.markUnreadEnabled
+        var nextFlags: [String: ConversationActionFlags] = [:]
+        for (id, bits) in snapshot.flags {
+            nextFlags[id] = ConversationActionFlags(rawValue: bits)
+        }
+        flags = nextFlags
+        var nextLeaves: [String: ConversationLeaveType] = [:]
+        for (id, value) in snapshot.left {
+            if let leave = ConversationLeaveType(rawValue: value) {
+                nextLeaves[id] = leave
+            }
+        }
+        left = nextLeaves
+        loaded = true
+    }
 }
 
 /// Client-side state of the actions: toast, removals, the single hidden conversation unlocked with the PIN. Kept out of

@@ -50,8 +50,8 @@ final class ZaloEngine {
     }
 
     /// A conversation as the official client knows it (conv-info-manager + profiles).
-    struct ConversationSummary: Identifiable, Equatable {
-        struct Preview: Equatable {
+    struct ConversationSummary: Identifiable, Equatable, Codable, Sendable {
+        struct Preview: Equatable, Codable, Sendable {
             var text: String
             var date: Date?
             var fromMe: Bool
@@ -149,6 +149,7 @@ final class ZaloEngine {
     @ObservationIgnored private var platform: ZaloPlatform?
     @ObservationIgnored private var loginTimeout: Task<Void, Never>?
     @ObservationIgnored private var runtimeInstall: Task<Void, Never>?
+    @ObservationIgnored private var snapshotSaveTask: Task<Void, Never>?
 
     var isDebugRendererVisible = false {
         didSet { if isDebugRendererVisible { host?.showDebugWindow() } }
@@ -267,6 +268,9 @@ final class ZaloEngine {
         self.mainProcess = mainProcess
         self.host = host
         startDevEvalIfEnabled()
+        if mainProcess.hasSession {
+            restoreConversationSnapshot()
+        }
         phase = mainProcess.hasSession ? .signingIn : .login(LoginState())
         mainProcess.start()
     }
@@ -293,6 +297,9 @@ final class ZaloEngine {
     func logOut() {
         ZaloMainProcess.clearCookies()
         mainProcess?.resetAccountState()
+        if let platform {
+            ConversationSnapshotStore.clear(platform: platform)
+        }
         profile = nil
         conversations = []
         conversationIndex = [:]
@@ -359,6 +366,7 @@ final class ZaloEngine {
             applyLoginState(state)
         case "main" where state["convActions"] != nil:
             handleConversationActions(state: state)
+            scheduleSnapshotSave()
         case "main" where state["conversationExtras"] != nil:
             handleConversationExtras(state: state)
         case "main" where state["zcloud"] != nil:
@@ -383,6 +391,7 @@ final class ZaloEngine {
             handleChat(state: state)
         case "main" where state["conversations"] != nil:
             mergeConversations(state)
+            scheduleSnapshotSave()
         case "main":
             if let user = state["user"] as? [String: Any], let id = user["userId"] as? String, !id.isEmpty {
                 profile = Profile(
@@ -391,6 +400,7 @@ final class ZaloEngine {
                     avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
                     phone: user["phoneNumber"] as? String
                 )
+                scheduleSnapshotSave()
             }
         default:
             break
@@ -600,6 +610,55 @@ final class ZaloEngine {
         let da = a.preview?.date ?? .distantPast, db = b.preview?.date ?? .distantPast
         if da != db { return da > db }
         return a.displayName.localizedCompare(b.displayName) == .orderedAscending
+    }
+
+    // MARK: Instant Cold-Start Snapshot
+
+    func scheduleSnapshotSave() {
+        snapshotSaveTask?.cancel()
+        snapshotSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled, let self, let platform = self.platform else { return }
+            guard !self.conversations.isEmpty, self.conversationActions.hiddenKnown else { return }
+            var flagBits: [String: Int] = [:]
+            for (id, flags) in self.conversationActions.flags {
+                if flags.rawValue != 0 { flagBits[id] = flags.rawValue }
+            }
+            var leftStrings: [String: String] = [:]
+            for (id, leave) in self.conversationActions.left {
+                leftStrings[id] = leave.rawValue
+            }
+            let snapshot = ConversationSnapshot(
+                version: 1,
+                userId: self.profile?.userId,
+                timestamp: Date(),
+                conversations: Array(self.conversations.prefix(300)),
+                hiddenIds: Array(self.conversationActions.hiddenIds),
+                flags: flagBits,
+                left: leftStrings,
+                hiddenEnabled: self.conversationActions.hiddenEnabled,
+                hasHiddenPIN: self.conversationActions.hasHiddenPIN,
+                markUnreadEnabled: self.conversationActions.markUnreadEnabled
+            )
+            ConversationSnapshotStore.save(snapshot, platform: platform)
+        }
+    }
+
+    private func restoreConversationSnapshot() {
+        guard let platform else { return }
+        guard let snapshot = ConversationSnapshotStore.load(platform: platform) else { return }
+        if let currentUid = profile?.userId, let snapUid = snapshot.userId, currentUid != snapUid {
+            return
+        }
+        // 1. Restore hidden state and flags first so protected chats never leak to UI
+        conversationActions.restore(from: snapshot)
+        // 2. Restore conversations & index
+        var index: [String: ConversationSummary] = [:]
+        for c in snapshot.conversations { index[c.id] = c }
+        conversationIndex = index
+        conversationsById = index
+        conversations = snapshot.conversations
+        EngineLog.shared.write("snapshot: restored \(snapshot.conversations.count) conversations, \(snapshot.hiddenIds.count) hidden")
     }
 
     static func decodeDataURL(_ url: String) -> Data? {
