@@ -317,12 +317,18 @@ final class ZaloEngine {
 
     // MARK: Events from the runtime
 
-    private func handle(_ event: ZaloMainProcess.Event) {
+    internal func handle(_ event: ZaloMainProcess.Event) {
         EngineLog.shared.write("main-process \(event)")
         switch event {
         case .loginSucceeded:
             loginTimeout?.cancel()
             signOutNotice = nil
+            // If the instant snapshot already transitioned the engine to .ready,
+            // preserve .ready so RootView does not flap back to SplashView and cause an unnecessary reload.
+            if case .ready = phase {
+                EngineLog.shared.write("loginSucceeded: preserving .ready phase for instant cold-start UI")
+                break
+            }
             phase = .signingIn
         case .loggedOut:
             profile = nil
@@ -576,11 +582,11 @@ final class ZaloEngine {
         let rows = (state["conversations"] as? [[String: Any]] ?? []).compactMap(Self.conversation)
         let reset = state["reset"] as? Bool ?? (state["removed"] == nil)
         let removed = state["removed"] as? [String] ?? []
-        // Non-destructive merge: if WebKit sends reset: true but rows is empty while the engine holds cached
+        // Non-destructive merge: if WebKit sends reset: true but rows is only a partial chunk while the engine holds cached
         // conversations from snapshot, do not wipe the index!
-        let shouldReset = reset && !rows.isEmpty && (conversationIndex.isEmpty || rows.count >= max(5, conversationIndex.count / 2))
+        let shouldReset = reset && !rows.isEmpty && (conversationIndex.isEmpty || rows.count >= conversationIndex.count)
         if reset && !shouldReset && !conversationIndex.isEmpty {
-            EngineLog.shared.write("mergeConversations: ignored premature empty reset (\(rows.count) rows) while holding \(conversationIndex.count) cached conversations")
+            EngineLog.shared.write("mergeConversations: ignored partial reset (\(rows.count) rows) while holding \(conversationIndex.count) cached conversations; merging non-destructively")
         }
         var index = shouldReset ? [:] : conversationIndex
         for id in removed { index.removeValue(forKey: id) }

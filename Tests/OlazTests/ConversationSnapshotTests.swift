@@ -347,4 +347,81 @@ import Foundation
         #expect(engine.conversationExtras.strangerFolderIds == ["stranger-1"])
         #expect(engine.conversationExtras.loaded == true)
     }
+
+    @Test func loginSucceededPreservesReadyPhaseForInstantColdStart() {
+        let engine = ZaloEngine()
+        engine.phase = .ready
+
+        // WebKit finishes initial auth/handshake and sends .loginSucceeded
+        engine.handle(.loginSucceeded)
+
+        // Engine MUST preserve .ready so RootView does not flap to SplashView and cause reload
+        #expect(engine.phase == .ready)
+    }
+
+    @Test func loginSucceededTransitionsFromLoginToSigningIn() {
+        let engine = ZaloEngine()
+        engine.phase = .login(ZaloEngine.LoginState())
+
+        // User finishes QR login
+        engine.handle(.loginSucceeded)
+
+        // Engine must transition to .signingIn for fresh login setup flow
+        #expect(engine.phase == .signingIn)
+    }
+
+    @Test func handleConversationExtrasPreservesPopulatedListAgainstPrematureShortList() {
+        let engine = ZaloEngine()
+        engine.conversationActions.flags = ["c1": .pinned]
+        engine.conversationExtras.listIds = ["c1", "c2", "c3", "c4", "c5", "c6"]
+        engine.conversationExtras.loaded = true
+
+        // WebKit sends premature update with only 1 pinned item while loading non-pinned rows
+        engine.handleConversationExtras(state: [
+            "conversationExtras": [
+                "listIds": ["c1"]
+            ]
+        ])
+
+        // Populated list must be preserved against premature truncation
+        #expect(engine.conversationExtras.listIds == ["c1", "c2", "c3", "c4", "c5", "c6"])
+
+        // When WebKit actually sends full updated list, it updates
+        let fullList = ["c1", "c2", "c3", "c4", "c5", "c6", "c7"]
+        engine.handleConversationExtras(state: [
+            "conversationExtras": [
+                "listIds": fullList
+            ]
+        ])
+        #expect(engine.conversationExtras.listIds == fullList)
+    }
+
+    @Test func mergeConversationsDoesNotWipeSnapshotOnPartialReset() {
+        let engine = ZaloEngine()
+        let convs = (1...10).map { i in
+            ZaloEngine.ConversationSummary(
+                id: "c-\(i)", isGroup: false, name: "Chat \(i)", avatar: nil,
+                pinned: false, members: 2, unread: 0, preview: nil
+            )
+        }
+        let platform = makePlatform()
+        defer { cleanupPlatform(platform) }
+        let snapshot = ConversationSnapshot(
+            version: 2, userId: "u1", timestamp: Date(),
+            conversations: convs, hiddenIds: [], flags: [:], left: [:],
+            hiddenEnabled: true, hasHiddenPIN: false, markUnreadEnabled: false
+        )
+        ConversationSnapshotStore.save(snapshot, platform: platform)
+        engine.restoreConversationSnapshot(platform: platform)
+        #expect(engine.conversations.count == 10)
+
+        // WebKit initial stream only returns first 6 conversations with reset: true
+        let partialPayload: [[String: Any]] = (1...6).map { i in
+            ["id": "c-\(i)", "name": "Chat \(i)", "isGroup": false]
+        }
+        engine.mergeConversations(["conversations": partialPayload, "reset": true, "removed": []])
+
+        // The remaining 4 conversations must NOT be wiped!
+        #expect(engine.conversations.count == 10)
+    }
 }

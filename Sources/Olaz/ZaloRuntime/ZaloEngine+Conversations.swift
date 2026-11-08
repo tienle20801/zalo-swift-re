@@ -172,7 +172,17 @@ extension ZaloEngine {
             next.typeFilter = (filter["type"] as? NSNumber)?.intValue ?? next.typeFilter
             next.labelFilterIds = filter["labelIds"] as? [String] ?? []
         }
-        if let ids = json["listIds"] as? [String] { next.listIds = ids }
+        if let ids = json["listIds"] as? [String] {
+            let nonPinnedCount = ids.filter { $0 != ConversationExtras.strangerBoxId && !conversationActions.isPinned($0) }.count
+            let hasExistingPopulatedList = conversationExtras.listIds.count > 5
+            if hasExistingPopulatedList && nonPinnedCount == 0 && !ids.isEmpty && ids.count < conversationExtras.listIds.count {
+                // Premature partial update (only pins loaded so far); keep existing listIds
+            } else if hasExistingPopulatedList && ids.isEmpty {
+                // Premature empty update; keep existing listIds
+            } else {
+                next.listIds = ids
+            }
+        }
         if let ids = json["strangerIds"] as? [String] { next.strangerIds = Set(ids) }
         if let ids = json["strangerFolderIds"] as? [String] { next.strangerFolderIds = ids }
         if let box = json["strangerBox"] as? [String: Any] {
