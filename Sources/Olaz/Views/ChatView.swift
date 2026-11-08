@@ -248,7 +248,10 @@ struct ChatView: View {
             if !staged.isEmpty {
                 let singlePhotoCaption = staged.count == 1 && !text.isEmpty && sentMentions.isEmpty && sentReply == nil
                 let outcome = await engine.sendMedia(staged.map(\.fileURL), to: id, caption: singlePhotoCaption ? sentDraft : nil)
-                if case .failed = outcome {
+                switch outcome {
+                case .done, .pending:
+                    break
+                case .failed, .cancelled:
                     engine.restoreStagedImages(staged, in: id)
                     if singlePhotoCaption {
                         engine.failedDrafts.stash(ComposerDraft(text: sentDraft, mentions: sentMentions, replyTo: sentReply), for: id, silent: true)
