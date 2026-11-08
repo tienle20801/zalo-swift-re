@@ -10,10 +10,11 @@ BUNDLE_ID="app.olaz.mac"
 # Marketing version and build number; scripts/release.sh sets them for a tagged release.
 VERSION="${OLAZ_VERSION:-1.0}"
 BUILD_NUMBER="${OLAZ_BUILD:-$VERSION}"
+APP_NAME="${APP_NAME:-${2:-Olaz}}"
 swift build -c "$CONFIG"
 BIN=".build/${CONFIG}/Olaz"
 
-APP="build/Olaz.app"
+APP="build/${APP_NAME}.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
@@ -33,8 +34,8 @@ cat > "$APP/Contents/Info.plist" << PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Olaz</string>
-    <key>CFBundleDisplayName</key><string>Olaz</string>
+    <key>CFBundleName</key><string>${APP_NAME}</string>
+    <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
     <key>CFBundleExecutable</key><string>Olaz</string>
     <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key><string>${BUILD_NUMBER}</string>
