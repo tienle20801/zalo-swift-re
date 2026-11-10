@@ -287,9 +287,12 @@ final class ScriptHarness {
           MSG: { ECARD: 19 }, findMessage: function (conv, id) { return messages[id] || null; }, ready: async function () { return true; },
           sleep: function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); }, controller: function () { return null; }
         };
-        var listed = [], fetched = [], known = { '11': { dName: 'An', avatar: 'a' } }, lists = { accept: ['11', '12', 'x', '11', '99'], reject: ['13'] }, listFails = false;
+        var listed = [], fetched = [], removed = [], known = { '11': { dName: 'An', avatar: 'a' } }, lists = { accept: ['11', '12', 'x', '11', '99'], reject: ['13'] }, listFails = false;
         var SVC_TOKEN = { name: 'reminder-detail-service' };
-        var service = { listResponders: async function (r) { listed.push(r.id); if (listFails) throw new Error('net'); return lists; } };
+        var service = {
+          listResponders: async function (r) { listed.push(r.id); if (listFails) throw new Error('net'); return lists; },
+          remove: async function (r) { removed.push(r.id); }
+        };
         core.S.friends = { getMiniInfo: function (u) { return known[u] || null; },
           getProfileFriendByIds: async function (ids) { fetched.push(ids.join(',')); ids.forEach(function (u) { if (u !== '99') known[u] = { dName: 'N' + u, avatar: '' }; }); } };
         core.S.codes = { FETCH_MINI_INFO: 5 };
@@ -455,6 +458,28 @@ final class ScriptHarness {
         let after = h.run("w", "\(api).reminderWatch('g1', 'invite', '')", steps: 1, step: 10)
         #expect(after?["pending"] as? String == "" && after?["mine"] as? String == "accept")
     }
+
+    @Test func reminderDeleteRemovesViaOfficialServiceAndUpdatesState() {
+        let h = harness()
+        h.ctx.evaluateScript("msg('m1', '55');")
+        _ = h.run("w", "\(api).reminderWatch('g1', 'm1', '')", steps: 1, step: 10)
+        h.ctx.evaluateScript("ctls.m1.set({ permission: { canDelete: true } });")
+        let res = h.run("del", "\(api).reminderDelete('g1', 'm1')", steps: 5, step: 100)
+        #expect(res?["ok"] as? Bool == true)
+        #expect(h.text("removed.join(',')") == "55")
+        // Card is now deleted
+        let after = h.run("w2", "\(api).reminderWatch('g1', 'm1', '')", steps: 1, step: 10)
+        #expect(after?["deleted"] as? Bool == true)
+        // Deleting again reports already-deleted
+        let res2 = h.run("del2", "\(api).reminderDelete('g1', 'm1')", steps: 5, step: 100)
+        #expect(res2?["ok"] as? Bool == false && res2?["error"] as? String == "already-deleted")
+        // Forbidden when canDelete is false
+        h.ctx.evaluateScript("msg('m2', '56');")
+        _ = h.run("w3", "\(api).reminderWatch('g1', 'm2', '')", steps: 1, step: 10)
+        h.ctx.evaluateScript("ctls.m2.set({ permission: { canDelete: false } });")
+        let forbid = h.run("del3", "\(api).reminderDelete('g1', 'm2')", steps: 5, step: 100)
+        #expect(forbid?["ok"] as? Bool == false && forbid?["error"] as? String == "forbidden")
+    }
 }
 
 private func jsString(_ s: String) -> String {
@@ -471,8 +496,8 @@ private func jsString(_ s: String) -> String {
     }
 
     @Test func snapshotCarriesTheReminderIdCountsAndPending() throws {
-        let s = try #require(ReminderSnapshot(json: try json(#"{"variant":"invite","rid":"55","isGroup":true,"onlyMe":false,"canRsvp":true,"accepted":3,"rejected":1,"pending":"accept","mine":"accept","sig":"x"}"#)))
-        #expect(s.id == "55" && s.acceptedCount == 3 && s.rejectedCount == 1 && s.pending == .accept)
+        let s = try #require(ReminderSnapshot(json: try json(#"{"variant":"invite","rid":"55","isGroup":true,"onlyMe":false,"canRsvp":true,"canDelete":true,"accepted":3,"rejected":1,"pending":"accept","mine":"accept","sig":"x"}"#)))
+        #expect(s.id == "55" && s.canDelete && s.acceptedCount == 3 && s.rejectedCount == 1 && s.pending == .accept)
         #expect(s.hasResponders && s.responderSummary == "3 người tham gia, 1 người từ chối")
         var none = s
         none.acceptedCount = 0; none.rejectedCount = 0

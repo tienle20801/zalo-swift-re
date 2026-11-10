@@ -532,6 +532,8 @@ struct ReminderSnapshot: Equatable, Sendable {
     var rejectedCount = 0
     var canRsvp = false
     var canView = false
+    var canDelete = false
+    var canEdit = false
     var deleted = false
     var sig = ""
 
@@ -563,7 +565,8 @@ struct ReminderSnapshot: Equatable, Sendable {
         start = ms > 0 && ms < 4_102_444_800_000 ? Date(timeIntervalSince1970: ms / 1000) : nil
         repeatLabel = root["repeat"] as? String ?? ""
         creatorName = root["creatorName"] as? String ?? ""
-        onlyMe = flag("onlyMe"); isGroup = flag("isGroup"); canRsvp = flag("canRsvp"); canView = flag("canView"); deleted = flag("deleted")
+        onlyMe = flag("onlyMe"); isGroup = flag("isGroup"); canRsvp = flag("canRsvp"); canView = flag("canView")
+        canDelete = flag("canDelete"); canEdit = flag("canEdit"); deleted = flag("deleted")
         mine = Answer(rawValue: root["mine"] as? String ?? "")
         pending = Answer(rawValue: root["pending"] as? String ?? "")
         acceptedCount = max(0, clampedInt((root["accepted"] as? NSNumber)?.doubleValue ?? 0))

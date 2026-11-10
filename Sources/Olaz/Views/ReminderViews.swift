@@ -295,6 +295,8 @@ struct ReminderDetailSheet: View {
     @State private var unavailable = false
     @State private var showingList: Bool
     @State private var responders: RespondersState = .idle
+    @State private var confirmingDelete = false
+    @State private var deleting = false
 
     enum RespondersState: Equatable { case idle, loading, failed, ready(ReminderResponders) }
 
@@ -311,6 +313,14 @@ struct ReminderDetailSheet: View {
         .frame(width: 360)
         .environment(\.cardActions, CardActions(conversationId: request.conversationId, messageId: request.messageId,
                                                 center: CardActionCenter.shared, engine: engine))
+        .confirmationDialog("Xóa nhắc hẹn?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Xóa nhắc hẹn", role: .destructive) {
+                Task { await performDelete() }
+            }
+            Button("Hủy", role: .cancel) {}
+        } message: {
+            Text("Nhắc hẹn này sẽ bị xóa khỏi cuộc trò chuyện đối với tất cả thành viên.")
+        }
         .task { await watch() }
         .task(id: showingList) { if showingList { await loadResponders() } }
     }
@@ -357,7 +367,39 @@ struct ReminderDetailSheet: View {
             } else {
                 ProgressView().controlSize(.small)
             }
-            HStack { Spacer(); Button("Đóng") { dismiss() }.keyboardShortcut(.cancelAction) }
+            HStack {
+                if let snapshot, snapshot.canDelete, !snapshot.deleted {
+                    Button(role: .destructive) {
+                        confirmingDelete = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            if deleting {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "trash").font(.system(size: 11))
+                            }
+                            Text("Xóa nhắc hẹn")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(deleting)
+                }
+                Spacer()
+                Button("Đóng") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+        }
+    }
+
+    private func performDelete() async {
+        deleting = true
+        let (ok, message) = await engine.deleteReminder(in: request.conversationId, message: request.messageId)
+        deleting = false
+        if ok {
+            dismiss()
+        } else if let message {
+            CardActionCenter.shared.show(message, in: request.conversationId)
         }
     }
 

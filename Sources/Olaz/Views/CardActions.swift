@@ -199,6 +199,10 @@ struct CardActions {
     func showReminder(openList: Bool = false) {
         center?.reminder = ReminderRequest(conversationId: conversationId, messageId: messageId, openList: openList)
     }
+    func deleteReminder() async -> (ok: Bool, message: String?) {
+        guard let engine else { return (false, nil) }
+        return await engine.deleteReminder(in: conversationId, message: messageId)
+    }
 }
 
 extension EnvironmentValues {

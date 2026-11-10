@@ -138,6 +138,21 @@ extension ZaloEngine {
         return ReminderResponders(json: answer?.value)
     }
 
+    /// Deletes a reminder (official reminder-detail-service `remove`); only called when confirmed by user.
+    func deleteReminder(in conversationId: String, message messageId: String) async -> (ok: Bool, message: String?) {
+        let answer = await raceTimeout(25) { [self] in JSBox(value: await callCard("reminderDelete", [conversationId, messageId])) }
+        guard let root = answer?.value as? [String: Any] else { return (false, "Không thể kết nối đến dịch vụ nhắc hẹn.") }
+        let ok = root["ok"] as? Bool ?? false
+        if ok { return (true, nil) }
+        let err = root["error"] as? String ?? ""
+        let msg = switch err {
+        case "forbidden": "Bạn không có quyền xóa nhắc hẹn này."
+        case "already-deleted": "Nhắc hẹn đã bị xóa trước đó."
+        default: "Không thể xóa nhắc hẹn lúc này. Vui lòng thử lại sau."
+        }
+        return (false, msg)
+    }
+
     private func callCard(_ method: String, _ args: [Any]) async -> Any? {
         guard let data = try? JSONSerialization.data(withJSONObject: args, options: [.fragmentsAllowed]),
               let json = String(data: data, encoding: .utf8) else { return nil }

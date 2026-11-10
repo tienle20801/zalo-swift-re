@@ -833,7 +833,7 @@
       // The answer being sent: this controller's own, or the one in flight through another card of the same reminder.
       mine: rsvpName(r.rsvp && r.rsvp.mine), pending: rsvpName(st.pendingRsvp) || rsvpFlight.get(flightKey(rec.convId, rid)) || '',
       accepted: countOf(r.rsvp && r.rsvp.accept), rejected: countOf(r.rsvp && r.rsvp.reject),
-      canRsvp: !!perm.canRsvp, canView: !!perm.canView, deleted: !!st.deleted,
+      canRsvp: !!perm.canRsvp, canView: !!perm.canView, canDelete: !!perm.canDelete, canEdit: !!perm.canEdit, deleted: !!st.deleted,
     };
     snap.sig = JSON.stringify(snap);
     return snap;
@@ -966,7 +966,7 @@
     const req = window.__zaloRequire;
     const mc = safe(() => req.c['jDHv'].exports.ModuleContainer, null), token = safe(() => req.c['GHUl'].exports.a, null);
     const svc = mc && token ? safe(() => mc.resolve(token), null) : null;
-    return svc && typeof svc.listResponders === 'function' ? svc : null;
+    return svc && (typeof svc.listResponders === 'function' || typeof svc.remove === 'function') ? svc : null;
   };
   const responderProfiles = async (uids) => {
     const svc = S.friends;
@@ -1013,11 +1013,42 @@
       };
     } catch (e) { diag('reminderResponders ' + scrubErr(e)); return { ok: false }; }
   };
+  const reminderDelete = async (convId, msgId) => {
+    try {
+      convId = String(convId);
+      await readyCached();
+      const rec = reminderOf(convId, msgId);
+      if (!rec) return { ok: false, error: 'not-found' };
+      if (rec.started) await within(rec.started, 10000);
+      const st = rec.ctl.getState() || {};
+      const r = st.reminder;
+      if (!r || st.deleted) return { ok: false, error: 'already-deleted' };
+      const perm = st.permission || {};
+      if (!perm.canDelete) return { ok: false, error: 'forbidden' };
+      const svc = reminderService();
+      if (!svc || typeof svc.remove !== 'function') return { ok: false, error: 'service-unavailable' };
+      await within(svc.remove(r), 20000);
+      safe(() => {
+        if (typeof rec.ctl.set === 'function') {
+          rec.ctl.set({ deleted: true });
+        } else if (rec.ctl.state) {
+          rec.ctl.state.deleted = true;
+        }
+      }, null);
+      notifyReminder(rec);
+      notifyReminderId(convId, r.id);
+      return { ok: true };
+    } catch (e) {
+      diag('reminderDelete ' + scrubErr(e));
+      return { ok: false, error: scrubErr(e) };
+    }
+  };
 
   chat.performAction = performAction;
   chat.reminderWatch = reminderWatch;
   chat.reminderRespond = reminderRespond;
   chat.reminderResponders = reminderResponders;
+  chat.reminderDelete = reminderDelete;
   chat.cardStickers = cardStickers;
   chat.contactState = contactState;
   chat.contactProfile = contactProfile;
