@@ -25,11 +25,13 @@ struct ConversationSnapshot: Codable, Sendable, Equatable {
     var listIds: [String] = []
     var strangerIds: [String] = []
     var strangerFolderIds: [String] = []
+    var cloudPlan: CloudState.Plan? = nil
 
     enum CodingKeys: String, CodingKey {
         case version, userId, timestamp, conversations, hiddenIds, flags, left
         case hiddenEnabled, hasHiddenPIN, markUnreadEnabled
         case selfConversationId, displayName, avatar, archivedEnabled, listIds, strangerIds, strangerFolderIds
+        case cloudPlan
     }
 
     init(
@@ -49,7 +51,8 @@ struct ConversationSnapshot: Codable, Sendable, Equatable {
         archivedEnabled: Bool = false,
         listIds: [String] = [],
         strangerIds: [String] = [],
-        strangerFolderIds: [String] = []
+        strangerFolderIds: [String] = [],
+        cloudPlan: CloudState.Plan? = nil
     ) {
         self.version = version
         self.userId = userId
@@ -68,6 +71,7 @@ struct ConversationSnapshot: Codable, Sendable, Equatable {
         self.listIds = listIds
         self.strangerIds = strangerIds
         self.strangerFolderIds = strangerFolderIds
+        self.cloudPlan = cloudPlan
     }
 
     init(from decoder: Decoder) throws {
@@ -89,6 +93,7 @@ struct ConversationSnapshot: Codable, Sendable, Equatable {
         listIds = try container.decodeIfPresent([String].self, forKey: .listIds) ?? []
         strangerIds = try container.decodeIfPresent([String].self, forKey: .strangerIds) ?? []
         strangerFolderIds = try container.decodeIfPresent([String].self, forKey: .strangerFolderIds) ?? []
+        cloudPlan = try container.decodeIfPresent(CloudState.Plan.self, forKey: .cloudPlan)
     }
 }
 

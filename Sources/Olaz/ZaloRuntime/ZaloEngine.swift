@@ -257,7 +257,7 @@ final class ZaloEngine {
             // Official `log`/`info` lines can carry message payloads: only warnings, errors and
             // Olaz's own adapter diagnostics reach the on-disk log, truncated.
             let official = line.hasPrefix("[log]") || line.hasPrefix("[info]")
-            if !official || line.contains("[adapter]") || line.contains("[chat]") || line.contains("[transfer]") {
+            if !official || line.contains("[adapter]") || line.contains("[chat]") || line.contains("[transfer]") || line.contains("[zcloud]") {
                 log.write("console " + String(line.prefix(300)))
             }
         }
@@ -337,6 +337,7 @@ final class ZaloEngine {
             // preserve .ready so RootView does not flap back to SplashView and cause an unnecessary reload.
             if case .ready = phase {
                 EngineLog.shared.write("loginSucceeded: preserving .ready phase for instant cold-start UI")
+                refreshCloud()
                 break
             }
             phase = .signingIn
@@ -367,10 +368,11 @@ final class ZaloEngine {
             dropComposerConfirms()
         case .finishedLoading(let page):
             mainProcess?.pageDidFinishLoading(page)
-            if page == .main { rewatchPolls(); republishConversationActions(); rewatchPins() }
+            if page == .main { rewatchPolls(); republishConversationActions(); rewatchPins(); refreshCloud() }
             if page == .main, case .signingIn = phase {
                 // The main client is up; conversations stream in as it syncs.
                 phase = .ready
+                refreshCloud()
             }
         case .failed(let error):
             log("[navigation] \(error.localizedDescription)")
@@ -674,7 +676,8 @@ final class ZaloEngine {
                 archivedEnabled: self.conversationExtras.archivedEnabled,
                 listIds: self.conversationExtras.listIds,
                 strangerIds: Array(self.conversationExtras.strangerIds),
-                strangerFolderIds: self.conversationExtras.strangerFolderIds
+                strangerFolderIds: self.conversationExtras.strangerFolderIds,
+                cloudPlan: self.cloud.plan
             )
             ConversationSnapshotStore.save(snapshot, platform: platform)
         }
@@ -711,6 +714,11 @@ final class ZaloEngine {
             conversationExtras.strangerIds = Set(snapshot.strangerIds)
             conversationExtras.strangerFolderIds = snapshot.strangerFolderIds
             conversationExtras.loaded = true
+        }
+
+        // 5. Restore cloud plan for instant storage bar display
+        if let plan = snapshot.cloudPlan {
+            cloud.plan = plan
         }
 
         EngineLog.shared.write("snapshot: restored \(snapshot.conversations.count) conversations, \(snapshot.hiddenIds.count) hidden, \(snapshot.flags.count) flags, archived=\(snapshot.archivedEnabled), listIds=\(snapshot.listIds.count)")

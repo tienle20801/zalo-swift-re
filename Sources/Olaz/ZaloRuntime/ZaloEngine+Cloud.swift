@@ -72,7 +72,7 @@ struct CloudBreakdown: Equatable, Sendable {
 }
 
 struct CloudState: Equatable {
-    enum PlanKind: String, Sendable {
+    enum PlanKind: String, Sendable, Codable {
         /// Paid zCloud subscription.
         case paid
         /// Free "Cloud của tôi" only.
@@ -83,7 +83,7 @@ struct CloudState: Equatable {
         case afterGrace
     }
 
-    struct Plan: Equatable, Sendable {
+    struct Plan: Equatable, Sendable, Codable {
         var kind: PlanKind
         var name: String
         var quota: Int64
@@ -288,7 +288,11 @@ extension ZaloEngine {
         if let changed = (json["changed"] as? NSNumber)?.intValue { next.changed = changed }
         if json["loaded"] as? Bool == true { next.loaded = true }
         if let lookup = json["hiddenLookup"] as? Bool { next.hiddenLookup = lookup }
-        if next != cloud { cloud = next }
+        if next != cloud {
+            let planChanged = next.plan != cloud.plan
+            cloud = next
+            if planChanged { scheduleSnapshotSave() }
+        }
     }
 
     private static func cloudItem(_ json: [String: Any]) -> CloudItem? {

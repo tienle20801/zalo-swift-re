@@ -56,7 +56,15 @@
   // answers unknown preload globals with are skipped) ----
   const S = {};
   let lastResolve = 0, resolveTries = 0;
-  const mod = (id) => { try { const m = window.__zaloRequire && window.__zaloRequire.c[id]; return m ? m.exports : null; } catch { return null; } };
+  const mod = (id) => {
+    try {
+      const req = window.__zaloRequire;
+      if (!req) return null;
+      if (req.c && req.c[id]) return req.c[id].exports;
+      if (typeof req === 'function' && req.m && req.m[id]) return req(id);
+      return null;
+    } catch { return null; }
+  };
   const real = (ex) => !!ex && (typeof ex === 'object' || typeof ex === 'function') && safe(() => ex.__olaz_not_a_member__, undefined) === undefined;
   const klass = (ex, ...protoMethods) => typeof ex === 'function' && typeof ex.getInstance === 'function' && !!ex.prototype && protoMethods.every((m) => typeof ex.prototype[m] === 'function');
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -140,18 +148,20 @@
       }
     }
   };
-  const ready = () => S.usage && S.cloud && S.cfg && S.api && S.bw && S.dl && S.consts && S.msg && S.dec && S.pkg;
+  const planReady = () => !!(S.usage && S.cfg);
+  const fullReady = () => !!(S.usage && S.cloud && S.cfg && S.api && S.bw && S.dl && S.consts && S.msg && S.dec && S.pkg);
+  const ready = () => fullReady();
   const resolve = () => {
     const req = window.__zaloRequire;
     if (!req || !window.__zaloStore || typeof window.__zaloEachExport !== 'function') return false;
-    if (ready()) { optional(); return true; }
-    if (Date.now() - lastResolve < (resolveTries < 240 ? 500 : 15000)) return false;
+    if (fullReady()) { optional(); return true; }
+    if (Date.now() - lastResolve < (resolveTries < 240 ? 500 : 15000)) return fullReady();
     lastResolve = Date.now(); resolveTries++;
     byId();
-    if (!ready()) scan();
+    if (!fullReady()) scan();
     optional();
-    if (ready()) diag('services resolved');
-    return !!ready();
+    if (fullReady()) diag('services resolved');
+    return fullReady();
   };
 
   const selfId = () => str((S.conf || S.confLite || {}).sendToMeId) || str(safe(() => mod('NDmK').default.sendToMeId, ''));
@@ -159,10 +169,14 @@
 
   // ---- plan ----
   const PLAN_KINDS = () => {
-    const P = S.consts.zCloudPlans;
+    const P = (S.consts && S.consts.zCloudPlans) || {};
     return { [P.zcloud]: 'paid', [P.free]: 'free', [P.grace_period]: 'grace', [P.free_after_grace_period]: 'afterGrace' };
   };
-  const planKind = () => PLAN_KINDS()[S.cfg.plan] || (S.cfg.isPaidUser() ? 'paid' : 'free');
+  const planKind = () => {
+    if (!S.cfg) return 'free';
+    const kinds = PLAN_KINDS();
+    return kinds[S.cfg.plan] || (typeof S.cfg.isPaidUser === 'function' && S.cfg.isPaidUser() ? 'paid' : 'free');
+  };
   const hasKey = () => {
     const X = safe(() => mod('Vf6s').a, null);
     if (typeof X === 'function') return !!safe(() => X(), false);
@@ -170,7 +184,10 @@
   };
 
   // ---- usage ----
-  const TYPE = () => ({ photo: [S.msg.MSG_PHOTO, S.msg.MSG_PHOTO_2, S.msg.MSG_DOODLE], video: [S.msg.MSG_VIDEO], file: [S.msg.MSG_FILE], voice: [S.msg.MSG_VOICE] });
+  const TYPE = () => {
+    if (!S.msg) return { photo: [], video: [], file: [], voice: [] };
+    return { photo: [S.msg.MSG_PHOTO, S.msg.MSG_PHOTO_2, S.msg.MSG_DOODLE], video: [S.msg.MSG_VIDEO], file: [S.msg.MSG_FILE], voice: [S.msg.MSG_VOICE] };
+  };
   const sumTypes = (t) => {
     const out = { photo: 0, video: 0, file: 0, voice: 0 };
     const m = TYPE();
@@ -217,13 +234,15 @@
   const loadInfo = async (force) => {
     if (!force && info && Date.now() - infoAt < 600000) return;
     infoAt = Date.now();
-    try { info = await S.pkg.getInfo(); } catch (e) { diag('cloud info failed: ' + errText(e)); }
-    try { settingsApi = await S.api.getCloudSettings(); settingsAt = Date.now(); } catch (e) { diag('cloud-settings failed: ' + errText(e)); }
+    try { if (S.pkg && typeof S.pkg.getInfo === 'function') info = await S.pkg.getInfo(); } catch (e) { diag('cloud info failed: ' + errText(e)); }
+    try { if (S.api && typeof S.api.getCloudSettings === 'function') { settingsApi = await S.api.getCloudSettings(); settingsAt = Date.now(); } } catch (e) { diag('cloud-settings failed: ' + errText(e)); }
   };
 
   let publishing = null;
+  let planPublished = false;
   const publish = (force) => {
-    if (!resolve()) return Promise.resolve();
+    resolve();
+    if (!planReady()) return Promise.resolve();
     if (publishing) return publishing;
     publishing = (async () => {
       try {
@@ -241,11 +260,11 @@
           const cs = settingsApi || {};
           const optIn = num(cs.opt_in);
           let names = null;
-          try { names = await S.pkg.getNameInfo(); } catch {}
+          try { if (S.pkg && typeof S.pkg.getNameInfo === 'function') names = await S.pkg.getNameInfo(); } catch {}
           const kind = planKind();
-          emit('selfId', me);
+          if (me) emit('selfId', me);
           emit('plan', {
-            kind, plan: num(u.plan !== undefined ? u.plan : S.cfg.plan),
+            kind, plan: num(u.plan !== undefined ? u.plan : (S.cfg ? S.cfg.plan : 0)),
             name: str(names && names.vi) || 'zCloud',
             quota: num(u.quota), usage: Math.max(0, num(u.usage)), family: num(u.family),
             cloudMedia: num(su.cloud_media), messageBackup: num(su.message_backup),
@@ -258,11 +277,14 @@
             fileLimit: num(cs.cloud_media_file_size_limit),
           });
           emit('types', { media, myCloud: myTypes });
-          emit('conversations', hiddenReady() ? buildConversations(u.usageByConversation) : []);
+          if (hiddenReady()) {
+            emit('conversations', buildConversations(u.usageByConversation));
+          }
           emit('hiddenLookup', hiddenReady());
+          planPublished = true;
         }
-        emit('settings', settingsSnapshot());
-        emit('loaded', true);
+        if (S.settings) emit('settings', settingsSnapshot());
+        if (fullReady()) emit('loaded', true);
       } catch (e) { diag('publish failed: ' + errText(e)); }
       finally { publishing = null; }
     })();
@@ -451,24 +473,32 @@
   // ---- live updates ----
   let listening = false, debounce = null;
   const attach = () => {
-    if (listening || !resolve()) return;
-    listening = true;
-    const E = S.consts.CLOUD_EVENT_TYPES;
-    const refreshSoon = () => { clearTimeout(debounce); debounce = setTimeout(() => publish(false), 800); };
-    const itemsChanged = () => { changedSeq++; post({ changed: changedSeq }); refreshSoon(); };
-    // The server echo of a delete: the local table no longer has the rows, stop hiding them.
-    const removed = (keys) => { if (Array.isArray(keys)) keys.forEach((k0) => { const k = typeof k0 === 'string' ? k0 : k0 && k0.zKey; if (k) { excluded.delete(k); items.delete(k); metas.delete(k); } }); itemsChanged(); };
-    const threadRemoved = () => { excluded.clear(); itemsChanged(); };
-    const on = (type, fn) => { try { S.cloud.addListener(type, fn); } catch (e) { diag('listener ' + type + ': ' + errText(e)); } };
-    for (const t of [E.USAGE_UPDATED, E.CHANGE_PLAN, E.FAMILY_INFO_UPDATED, E.UPDATE_CLOUD_KEY_STATUS, E.UPDATE_INFO]) on(t, refreshSoon);
-    on(E.ADD_CLOUD_ITEMS, itemsChanged);
-    on(E.REMOVE_CLOUD_ITEMS, removed);
-    on(E.REMOVE_THREAD_CLOUD, threadRemoved);
-    setInterval(() => { emit('settings', settingsSnapshot()); }, 3000);
-    setInterval(() => publish(false), 60000);
-    publish(true);
+    resolve();
+    if (!listening && fullReady()) {
+      listening = true;
+      const E = S.consts.CLOUD_EVENT_TYPES;
+      const refreshSoon = () => { clearTimeout(debounce); debounce = setTimeout(() => publish(false), 800); };
+      const itemsChanged = () => { changedSeq++; post({ changed: changedSeq }); refreshSoon(); };
+      // The server echo of a delete: the local table no longer has the rows, stop hiding them.
+      const removed = (keys) => { if (Array.isArray(keys)) keys.forEach((k0) => { const k = typeof k0 === 'string' ? k0 : k0 && k0.zKey; if (k) { excluded.delete(k); items.delete(k); metas.delete(k); } }); itemsChanged(); };
+      const threadRemoved = () => { excluded.clear(); itemsChanged(); };
+      const on = (type, fn) => { try { S.cloud.addListener(type, fn); } catch (e) { diag('listener ' + type + ': ' + errText(e)); } };
+      for (const t of [E.USAGE_UPDATED, E.CHANGE_PLAN, E.FAMILY_INFO_UPDATED, E.UPDATE_CLOUD_KEY_STATUS, E.UPDATE_INFO]) on(t, refreshSoon);
+      on(E.ADD_CLOUD_ITEMS, itemsChanged);
+      on(E.REMOVE_CLOUD_ITEMS, removed);
+      on(E.REMOVE_THREAD_CLOUD, threadRemoved);
+      setInterval(() => { if (S.settings) emit('settings', settingsSnapshot()); }, 3000);
+      setInterval(() => publish(false), 60000);
+    }
+    if (planReady()) {
+      publish(true);
+    }
   };
-  const starter = setInterval(() => { attach(); if (listening) clearInterval(starter); }, 1000);
+  attach();
+  const starter = setInterval(() => {
+    attach();
+    if (listening && planPublished) clearInterval(starter);
+  }, 500);
 
   window[NAME] = {
     refresh() { return publish(true); },

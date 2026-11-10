@@ -228,7 +228,25 @@ import Foundation
             archivedEnabled: true,
             listIds: ["c1", "c2"],
             strangerIds: ["s1"],
-            strangerFolderIds: ["s1"]
+            strangerFolderIds: ["s1"],
+            cloudPlan: CloudState.Plan(
+                kind: .paid,
+                name: "zCloud 100GB",
+                quota: 107374182400,
+                usage: 751619276,
+                family: 0,
+                cloudMedia: 500000000,
+                messageBackup: 251619276,
+                myCloud: 100000000,
+                expireAt: Date(timeIntervalSince1970: 1750000000),
+                autoRenew: true,
+                months: 12,
+                hasKey: true,
+                backupMedia: true,
+                backupMyCloud: true,
+                backupMessages: true,
+                fileLimit: 1073741824
+            )
         )
 
         ConversationSnapshotStore.save(original, platform: platform)
@@ -240,6 +258,9 @@ import Foundation
         #expect(loaded.archivedEnabled == true)
         #expect(loaded.listIds == ["c1", "c2"])
         #expect(loaded.strangerFolderIds == ["s1"])
+        #expect(loaded.cloudPlan?.quota == 107374182400)
+        #expect(loaded.cloudPlan?.usage == 751619276)
+        #expect(loaded.cloudPlan?.name == "zCloud 100GB")
 
         // Backwards compatibility with v1 JSON (no v2 keys)
         let v1JSON = """
