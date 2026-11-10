@@ -399,17 +399,48 @@
   };
 
   // Reminder inside an e-card (`getDataReminder`, offset ~19984473): params.actions = [{actionId:'action.open.reminder', data: JSON}];
-  // data {startTime (ms), msg (quoted title), params{title}, repeat 0 once / 1 daily / 2 weekly / 3 monthly}.
+  // data {startTime (ms), msg (quoted or raw title), params{title}, repeat 0 once / 1 daily / 2 weekly / 3 monthly}.
+  // May also be nested inside {act: 'remind_topic', data: JSON / Object}.
   const reminderOf = (o, p) => {
     const acts = p && Array.isArray(p.actions) ? p.actions : null;
-    if (!acts || acts.length !== 1 || !acts[0] || acts[0].actionId !== 'action.open.reminder' || typeof acts[0].data !== 'string') return null;
-    const d = parseJSON(acts[0].data);
-    if (!Object.keys(d).length) return null;
-    const dp = parseJSON(d.params);
-    let title = typeof d.msg === 'string' && d.msg.length > 2 ? d.msg.slice(1, d.msg.length - 1) : '';
-    title = title || str(dp.title);
-    const repeat = ({ 1: 'Nhắc theo ngày', 2: 'Nhắc theo tuần', 3: 'Nhắc theo tháng' })[Number(d.repeat)] || '';
-    return { title, start: num(d.startTime), repeat };
+    if (!acts) return null;
+    const act = acts.find((a) => a && a.actionId === 'action.open.reminder');
+    if (!act) return null;
+    let rawData = act.data;
+    let d = typeof rawData === 'string' ? parseJSON(rawData) : (rawData && typeof rawData === 'object' ? rawData : null);
+    if (!d || typeof d !== 'object') return null;
+    if (typeof d.act === 'string' && d.data !== undefined) {
+      d = typeof d.data === 'string' ? parseJSON(d.data) : (d.data && typeof d.data === 'object' ? d.data : d);
+      if (!d || typeof d !== 'object') return null;
+    }
+    const dp = (typeof d.params === 'string' ? parseJSON(d.params) : (d.params && typeof d.params === 'object' ? d.params : null)) || {};
+    let title = '';
+    if (typeof d.msg === 'string') {
+      const trimmed = d.msg.trim();
+      title = trimmed.length >= 2 && trimmed.charAt(0) === '"' && trimmed.charAt(trimmed.length - 1) === '"'
+        ? trimmed.slice(1, -1) : trimmed;
+    }
+    title = title || str(dp.title) || str(d.title);
+    if (!title && str(p.previewTxt)) {
+      title = str(p.previewTxt).replace(/^⏰\s*(?:Nhắc hẹn:\s*)?/, '').trim();
+    }
+    title = title || str(o.title) || str(o.description);
+
+    let start = num(
+      d.startTime || d.time || d.remindTime || d.date ||
+      dp.startTime || dp.time || dp.remindTime || dp.date
+    );
+    if (start > 0 && start < 100000000000) {
+      start *= 1000;
+    }
+
+    const repeatVal = d.repeat !== undefined ? d.repeat : dp.repeat;
+    let repeat = ({ 1: 'Nhắc theo ngày', 2: 'Nhắc theo tuần', 3: 'Nhắc theo tháng' })[Number(repeatVal)] || '';
+    if (!repeat && d.repeatRule && typeof d.repeatRule === 'object') {
+      const freq = str(d.repeatRule.freq).toUpperCase();
+      repeat = ({ DAILY: 'Nhắc theo ngày', WEEKLY: 'Nhắc theo tuần', MONTHLY: 'Nhắc theo tháng', YEARLY: 'Nhắc theo năm' })[freq] || '';
+    }
+    return { title, start, repeat };
   };
 
   // E-card (ECARD 25; normalizer at offset ~934672; renderer: class at ~247500 "genLayout1/2", new-friend / birthday cards ~229000).

@@ -39,18 +39,25 @@ struct ReminderCardView: View {
     // MARK: Static card (from the message)
 
     private var staticCard: some View {
-        HStack(spacing: 14) {
-            ReminderCalendar(start: card.reminderStart)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(card.reminderTitle.isEmpty ? "Nhắc hẹn" : card.reminderTitle)
-                    .font(.system(size: 14, weight: .semibold)).lineLimit(3)
-                ReminderMeta(start: card.reminderStart, repeatLabel: card.reminderRepeat)
+        let displayTitle = !card.reminderTitle.isEmpty ? card.reminderTitle
+            : (!card.title.isEmpty ? card.title : (!card.description.isEmpty ? card.description : "Nhắc hẹn"))
+        return Button { actions.showReminder() } label: {
+            HStack(spacing: 14) {
+                ReminderCalendar(start: card.reminderStart)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(displayTitle)
+                        .font(.system(size: 14, weight: .semibold)).lineLimit(3)
+                    ReminderMeta(start: card.reminderStart, repeatLabel: card.reminderRepeat)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding(12)
+            .frame(width: 300)
+            .contentShape(Rectangle())
         }
-        .padding(12)
-        .frame(width: 300)
+        .buttonStyle(.plain)
         .cardChrome(radius: 16)
+        .help("Xem chi tiết")
         .accessibilityElement(children: .combine)
     }
 
@@ -177,13 +184,23 @@ struct ReminderCalendar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(start.map { CardFormat.weekday.string(from: $0).capitalized } ?? "")
+            Text(start.map { CardFormat.weekday.string(from: $0).capitalized } ?? "HẸN")
                 .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(.white)
                 .frame(maxWidth: .infinity).padding(.vertical, 3).background(Color.red)
-            Text(start.map { CardFormat.day.string(from: $0) } ?? "--")
-                .font(.system(size: 22, weight: .bold, design: .rounded)).padding(.top, 2)
-            Text(start.map { CardFormat.month.string(from: $0).capitalized } ?? "")
-                .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.bottom, 4)
+            if let start {
+                Text(CardFormat.day.string(from: start))
+                    .font(.system(size: 22, weight: .bold, design: .rounded)).padding(.top, 2)
+                Text(CardFormat.month.string(from: start).capitalized)
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.bottom, 4)
+            } else {
+                Image(systemName: "alarm")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(height: 28)
+                    .padding(.top, 2)
+                Text("Nhắc hẹn")
+                    .font(.system(size: 9.5)).foregroundStyle(.secondary).padding(.bottom, 4)
+            }
         }
         .frame(width: 64)
         .background(Color(nsColor: .controlBackgroundColor))

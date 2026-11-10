@@ -343,7 +343,7 @@
   };
   // Official `isCardSticker()` (~250614): a single sendsticker action carrying a sticker list.
   const isCardSticker = (info) => info.acts.length === 1 && info.acts[0].actionId === 'action.open.sendsticker' && info.stickers.length > 0;
-  const isReminder = (info) => info.acts.length === 1 && info.acts[0].actionId === 'action.open.reminder';
+  const isReminder = (info) => Array.isArray(info.acts) && info.acts.some((a) => a && a.actionId === 'action.open.reminder');
   const wantsStickers = (info) => {
     if (isReminder(info)) return false;
     if (info.type === 2 || info.type === 3) return info.newFriend && info.stickers.length > 0;
@@ -855,8 +855,9 @@
       dropReminder(victim[0], victim[1]);
     }
   };
-  // Official gate of the v2 reminder card (`legacy-bridge` "2Jz/" `f()`: new UI enabled and `renderEcard` registered). Closed → the
-  // official client draws its legacy card, so no controller is used here. Module missing = unknown = not blocked.
+  // Official gate of the v2 reminder card (`legacy-bridge` "2Jz/" `f()`: new UI enabled and `renderEcard` registered).
+  // In Electron, the official client falls back to a legacy React card if closed. In Olaz, native SwiftUI renders
+  // all cards, so the controller (X.reminder) is instantiated whenever available to serve live topic data and RSVPs.
   const reminderGate = () => {
     const m = safe(() => window.__zaloRequire.c['2Jz/'].exports, null);
     return m && typeof m.f === 'function' ? safe(() => m.f() === true, null) : null;
@@ -864,10 +865,13 @@
   // The reminder reference the official normalizer needs (module "oxPB" `d` / `a`): the action data parses to an object holding a
   // `topicId` / `reminderId` / `id`; otherwise the controller has nothing to show.
   const reminderRefOk = (info) => {
-    let d = dataOf(info.acts[0].data);
+    const act = Array.isArray(info.acts) ? info.acts.find((a) => a && a.actionId === 'action.open.reminder') : null;
+    if (!act) return false;
+    let d = dataOf(act.data);
     if (d && typeof d.act === 'string' && d.data !== undefined) d = typeof d.data === 'string' ? dataOf(d.data) : d.data;
     if (!d || typeof d !== 'object') return false;
-    return [d.topicId, d.reminderId, d.id].some((v) => (typeof v === 'string' && v !== '') || (typeof v === 'number' && Number.isFinite(v)));
+    const dp = dataOf(d.params) || (d.params && typeof d.params === 'object' ? d.params : {});
+    return [d.topicId, d.reminderId, d.id, dp.topicId, dp.reminderId, dp.id].some((v) => (typeof v === 'string' && v !== '') || (typeof v === 'number' && Number.isFinite(v)));
   };
   const reminderOf = (convId, msgId) => {
     scan();
@@ -876,7 +880,6 @@
     if (!m || Number(m.msgType) !== MSG.ECARD) return null;
     const info = ecardInfo(m);
     if (!isReminder(info) || !reminderRefOk(info)) return null;
-    if (reminderGate() === false) return null;
     const key = convId + '|' + String(m.msgId || m.cliMsgId);
     let rec = reminders.get(key);
     if (!rec) {

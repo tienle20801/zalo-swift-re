@@ -320,11 +320,12 @@ final class ScriptHarness {
         #expect(snap?["accepted"] as? Int == 0 && snap?["pending"] as? String == "")
     }
 
-    @Test func officialGateAndBrokenDataKeepTheControllerOut() {
+    @Test func controllerInstantiatesEvenIfOfficialGateIsFalseAndBrokenDataIsKeptOut() {
         let closed = harness(gate: "false")
         closed.ctx.evaluateScript("msg('m1', '55');")
-        #expect(closed.run("w", "\(api).reminderWatch('g1', 'm1', '')") == nil)
-        #expect(closed.number("created") == 0, "gate closed: the official client draws its legacy card, no controller is built")
+        #expect(closed.run("w", "\(api).reminderWatch('g1', 'm1', '')")?["rid"] as? String == "55",
+                "gate closed in official client should not prevent native Olaz controller from running")
+        #expect(closed.number("created") == 1)
         let unknown = harness(gate: nil)   // the module cannot be found → unknown → not blocked
         unknown.ctx.evaluateScript("msg('m1', '55');")
         #expect(unknown.run("w", "\(api).reminderWatch('g1', 'm1', '')")?["rid"] as? String == "55")
@@ -335,6 +336,29 @@ final class ScriptHarness {
         """)
         #expect(bad.run("b1", "\(api).reminderWatch('g1', 'b1', '')") == nil && bad.run("b2", "\(api).reminderWatch('g1', 'b2', '')") == nil)
         #expect(bad.number("created") == 0)
+    }
+
+    @Test func nestedRemindTopicWrapperResolvesCorrectly() {
+        let h = harness()
+        h.ctx.evaluateScript("""
+        messages.nested1 = {
+          msgType: 19, msgId: 'nested1', rid: '99',
+          message: {
+            params: JSON.stringify({
+              actions: [{
+                actionId: 'action.open.reminder',
+                data: JSON.stringify({
+                  act: 'remind_topic',
+                  data: JSON.stringify({ topicId: '99', startTime: 1731000000000 })
+                })
+              }]
+            })
+          }
+        };
+        """)
+        let snap = h.run("w", "\(api).reminderWatch('g1', 'nested1', '')")
+        #expect(snap?["rid"] as? String == "99")
+        #expect(h.number("created") == 1)
     }
 
     @Test func evictionIsLeastRecentlyUsedAndSparesWatchedControllers() {
@@ -509,5 +533,77 @@ private func jsString(_ s: String) -> String {
         #expect(PollActionResult(ok: false, error: "limit").message(for: .pin).contains("Bảng ghim đã đầy"))
         #expect(PollActionResult(ok: false, error: "failed").message(for: .unpin).contains("Bỏ ghim"))
         #expect(PollActionResult(ok: false, error: "forbidden").message(for: .lock) == "Bạn không có quyền khóa bình chọn này")
+    }
+}
+
+// MARK: - chat-adapter.js reminder mapping
+
+@Suite struct ChatAdapterReminderMappingTests {
+    private func harness(messages: String) -> ScriptHarness {
+        let h = ScriptHarness(prelude: """
+        var NOW = 1.7e12, posts = [];
+        var webkit = { messageHandlers: { zstate: { postMessage: function (s) { posts.push(JSON.parse(JSON.stringify(s))); } }, zlog: { postMessage: function () {} } } };
+        var convs = { u2: { messages: \(messages), msgList: { hasMoreLocal: false } } };
+        var subs = [];
+        var tick = function () { subs.forEach(function (f) { f(); }); };
+        window.__zaloStore = {
+          getState: function () {
+            return { user: { userId: 'me1', displayName: 'Tôi', avatar: '' }, conversations: { alls: convs } };
+          },
+          subscribe: function (f) { subs.push(f); },
+          dispatch: function () {}
+        };
+        var loader = { cacheMessageLoader: new Map([['u2', { active: function () {}, deActive: function () {} }]]), getLastMessagesForConversation: async function () {} };
+        var typing = { mapIdTyping: {}, addItemTyping: function () {}, removeItemTyping: function () {} };
+        var reactCache = { generateReactMsg: function () {}, updateReactionListener: null, addUpdateReactListener: function () {}, getMessageReactions: async function () { return {}; }, getIconMap: function () { return {}; } };
+        var reactSender = { sendQueue: [], sendReaction: function () {} };
+        var cfg = { stickerUrl: 'https://s/', sendToMeId: 'cloud1' };
+        var chat = { broadCastMessage: function () {}, chatboxController: { convId: 'u2' } };
+        var opener = { openConversation: async function () {}, conversationWillOpen: function () {}, closeConversation: async function () {}, sidebar: { getSelectedId: function () { return 'u2'; } } };
+        var io = { getFriendManagerModule: async function () { return { default: { getDName: function () { return ''; }, getAvatar: function () { return ''; } } }; }, getGroupManagerModule: async function () { return { default: {} }; } };
+        window.__zaloRequire = { c: {} };
+        window.__zaloDI = function () { return [{ instance: chat }, { instance: opener }, { instance: io }]; };
+        window.__zaloEachExport = function (req, visit) { [loader, typing, reactCache, reactSender, cfg].forEach(function (ex) { visit(ex, 'x'); }); };
+        window.__zaloMsgActions = { describe: function () { return {}; } };
+        window.__zaloCardActions = { describe: function () { return null; } };
+        """)
+        h.load("chat-adapter.js")
+        return h
+    }
+
+    @Test func unquotedAndNestedReminderMessagesMapCleanly() {
+        let ecardMsg = """
+        [{
+          msgId: '101', cliMsgId: '101', fromUid: 'u2', toUid: 'me1', msgType: 25, status: 1, sendDttm: 1.7e12,
+          message: {
+            title: 'Họp team',
+            params: JSON.stringify({
+              previewTxt: '⏰ Họp team định kỳ',
+              actions: [{
+                actionId: 'action.open.reminder',
+                data: JSON.stringify({
+                  act: 'remind_topic',
+                  data: JSON.stringify({
+                    topicId: 't1',
+                    msg: 'Họp team định kỳ',
+                    startTime: 1731500000,
+                    repeat: 1
+                  })
+                })
+              }]
+            })
+          }
+        }]
+        """
+        let h = harness(messages: ecardMsg)
+        _ = h.runUntilSettled("open", "window.__zaloChat.open('u2')", step: 200)
+        h.pump(steps: 3, step: 200)
+        let postsStr = h.text("JSON.stringify(posts)")
+        #expect(postsStr != "[]", "posts: \(postsStr)")
+        let str = h.text("JSON.stringify((posts.filter(function (p) { return p.chat && p.chat.messages && p.chat.messages.length; })[0] || {chat:{messages:[{}]}}).chat.messages[0].kind)")
+        #expect(str.contains(#""style":"reminder""#))
+        #expect(str.contains(#""reminderTitle":"Họp team định kỳ""#))
+        #expect(str.contains(#""reminderStart":1731500000000"#))
+        #expect(str.contains(#""reminderRepeat":"Nhắc theo ngày""#))
     }
 }
