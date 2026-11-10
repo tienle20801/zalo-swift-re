@@ -34,8 +34,11 @@ enum CardFormat {
         return f
     }
     static let weekday = formatter("EEEE")
+    static let weekdayShort = formatter("EEE")
     static let day = formatter("dd")
     static let month = formatter("MMMM")
+    static let timeOnly = formatter("HH:mm")
+    static let dateTimeCompact = formatter("dd/MM/yyyy HH:mm")
     /// Official reminder line: "WD DD/MM/YYYY" + time.
     static let dateTime = formatter("EEEE dd/MM/yyyy HH:mm")
 }

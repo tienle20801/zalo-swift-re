@@ -142,6 +142,8 @@ final class ZaloEngine {
     var messageConfirm: MessageActionConfirm?
     var deleteUndo: DeleteUndo?
     internal(set) var pins: [String: PinnedList] = [:]
+    /// Reminder message IDs deleted in the current session (ZaloEngine+CardActions.swift).
+    var deletedReminderIds: Set<String> = []
     /// Message actions in flight ("conv|msg|action"): a second click while one runs is ignored.
     @ObservationIgnored internal var messageActionsBusy: Set<String> = []
 

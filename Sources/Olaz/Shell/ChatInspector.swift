@@ -14,6 +14,9 @@ struct ChatInspector: View {
     @State private var showLabelManager = false
     @State private var pollSheet: PollEntry?
     @State private var showPollCreate = false
+    @State private var reminderSheet: ReminderRequest?
+    @State private var reminderComposeInfo: ReminderComposeInfo?
+    @State private var showAllReminders = false
     /// Width of the overview's scroll view itself (not of its content, see `SharedMediaGrid`).
     @State private var outerWidth: CGFloat = 300
     /// Photos / files / links ever shared, read from the official media service (the overview shows the newest of each).
@@ -47,18 +50,30 @@ struct ChatInspector: View {
             PollDetailSheet(pollId: poll.pollId, conversationId: id, question: poll.question)
         }
         .sheet(isPresented: $showPollCreate) { PollCreateSheet(conversationId: id) }
+        .sheet(item: $reminderSheet) { req in
+            ReminderDetailSheet(request: req).cardNoticeOverlay()
+        }
+        .sheet(isPresented: Binding(get: { reminderComposeInfo != nil }, set: { if !$0 { reminderComposeInfo = nil } })) {
+            if let reminderComposeInfo {
+                ReminderComposeSheet(conversationId: id, info: reminderComposeInfo)
+            }
+        }
         .sheet(isPresented: $showLabelManager) { LabelManagerView() }
     }
 
     private var overview: some View {
         let loaded = engine.messages[id] ?? []
+        let reminders = LoadedReminders(messages: loaded, deletedIds: engine.deletedReminderIds).reminders
         return ScrollView {
             VStack(spacing: 20) {
                 header
                 actions
                 if conversation.isGroup {
                     groupBoard(LoadedPolls(messages: loaded).polls)
+                    remindersSection(reminders)
                     membersSection
+                } else {
+                    remindersSection(reminders)
                 }
                 mediaSection(preview(.images, loaded))
                 filesSection(preview(.files, loaded))
@@ -180,6 +195,118 @@ struct ChatInspector: View {
                     emptyLine("Chưa có bình chọn trong nội dung đã tải")
                 }
             }
+        }
+    }
+
+    // MARK: Reminders
+
+    private func remindersSection(_ reminders: [LoadedReminders.Reminder]) -> some View {
+        let shown = showAllReminders ? reminders : Array(reminders.prefix(listLimit))
+        return section("Nhắc hẹn", trailing: reminders.isEmpty ? nil : "\(reminders.count)") {
+            list {
+                row(symbol: "plus.circle", title: "Tạo nhắc hẹn") { openReminder() }
+                ForEach(shown) { reminder in
+                    Divider().padding(.leading, 46)
+                    reminderRow(reminder)
+                }
+                if reminders.isEmpty {
+                    Divider().padding(.leading, 40)
+                    emptyLine("Chưa có nhắc hẹn nào")
+                } else if reminders.count > listLimit {
+                    Divider().padding(.leading, 46)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showAllReminders.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(showAllReminders ? "Thu gọn" : "Xem thêm (\(reminders.count - listLimit) nhắc hẹn khác)")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.tint)
+                            Spacer()
+                            Image(systemName: showAllReminders ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.tint)
+                        }
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 34)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func reminderRow(_ reminder: LoadedReminders.Reminder) -> some View {
+        Button {
+            reminderSheet = ReminderRequest(conversationId: id, messageId: reminder.id)
+        } label: {
+            HStack(spacing: 10) {
+                ReminderCalendarBadge(start: reminder.start, isPast: reminder.isPast)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(reminder.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(reminder.isPast ? .secondary : .primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    Text(reminderSubtitle(reminder))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .opacity(reminder.isPast ? 0.75 : 1.0)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(minHeight: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Xem chi tiết nhắc hẹn")
+    }
+
+    private func reminderSubtitle(_ reminder: LoadedReminders.Reminder) -> String {
+        var parts: [String] = []
+        if let start = reminder.start {
+            let cal = Calendar.current
+            let timeStr = CardFormat.timeOnly.string(from: start)
+            if cal.isDateInToday(start) {
+                parts.append("Hôm nay, \(timeStr)")
+            } else if cal.isDateInTomorrow(start) {
+                parts.append("Ngày mai, \(timeStr)")
+            } else {
+                parts.append(CardFormat.dateTimeCompact.string(from: start))
+            }
+        } else {
+            parts.append("Nhắc hẹn")
+        }
+        if !reminder.repeatLabel.isEmpty {
+            parts.append(reminder.repeatLabel)
+        }
+        if reminder.isPast {
+            parts.append("Đã qua")
+        }
+        return parts.joined(separator: " • ")
+    }
+
+    private func openReminder() {
+        let target = id
+        Task {
+            guard let info = await engine.reminderComposeInfo(for: target) else {
+                CardActionCenter.shared.show("Chưa đọc được thông tin nhắc hẹn từ Zalo. Hãy thử lại sau giây lát.", in: target)
+                return
+            }
+            guard info.allowed else {
+                CardActionCenter.shared.show(info.text.isEmpty ? "Không thể tạo nhắc hẹn trong cuộc trò chuyện này." : info.text, in: target)
+                return
+            }
+            if id == target { reminderComposeInfo = info }
         }
     }
 
@@ -423,5 +550,108 @@ private struct LoadedPolls {
                 polls.append(Poll(id: info.pollId, question: info.question))
             }
         }
+    }
+}
+
+/// Reminders found in the loaded part of the history, upcoming first, then past reminders.
+struct LoadedReminders {
+    struct Reminder: Identifiable, Equatable {
+        let id: String
+        let title: String
+        let start: Date?
+        let repeatLabel: String
+        let createdTime: Date
+
+        var isPast: Bool {
+            guard let start else { return false }
+            return start < Date()
+        }
+    }
+
+    var reminders: [Reminder] = []
+
+    init(messages: [ChatMessage], deletedIds: Set<String> = []) {
+        var seenIds: Set<String> = []
+        for message in messages.reversed() {
+            guard case .ecard(let card) = message.kind,
+                  card.style == .reminder || card.reminderStart != nil || !card.reminderTitle.isEmpty,
+                  !message.id.isEmpty,
+                  !deletedIds.contains(message.id),
+                  seenIds.insert(message.id).inserted
+            else { continue }
+
+            let displayTitle = !card.reminderTitle.isEmpty ? card.reminderTitle
+                : (!card.title.isEmpty ? card.title : (!card.description.isEmpty ? card.description : "Nhắc hẹn"))
+
+            reminders.append(Reminder(
+                id: message.id,
+                title: displayTitle,
+                start: card.reminderStart,
+                repeatLabel: card.reminderRepeat,
+                createdTime: message.date
+            ))
+        }
+
+        reminders.sort { r1, r2 in
+            switch (r1.start, r2.start) {
+            case let (s1?, s2?):
+                return s1 < s2
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return r1.createdTime > r2.createdTime
+            }
+        }
+    }
+}
+
+private struct ReminderCalendarBadge: View {
+    let start: Date?
+    let isPast: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(headerText)
+                .font(.system(size: 7.5, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 10)
+                .background(headerColor)
+
+            Group {
+                if let start {
+                    Text(CardFormat.day.string(from: start))
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(isPast ? .secondary : .primary)
+                } else {
+                    Image(systemName: "alarm.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(isPast ? .secondary : Color(red: 1.0, green: 0.27, blue: 0.23))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .controlBackgroundColor))
+        }
+        .frame(width: 28, height: 28)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+        )
+    }
+
+    private var headerText: String {
+        guard let start else { return "HẸN" }
+        let weekday = CardFormat.weekdayShort.string(from: start).uppercased()
+        return weekday.replacingOccurrences(of: "THỨ ", with: "T")
+    }
+
+    private var headerColor: Color {
+        if isPast {
+            return Color.secondary.opacity(0.6)
+        }
+        return Color(red: 1.0, green: 0.27, blue: 0.23)
     }
 }

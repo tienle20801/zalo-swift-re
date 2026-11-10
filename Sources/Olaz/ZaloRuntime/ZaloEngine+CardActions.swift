@@ -143,11 +143,17 @@ extension ZaloEngine {
         let answer = await raceTimeout(25) { [self] in JSBox(value: await callCard("reminderDelete", [conversationId, messageId])) }
         guard let root = answer?.value as? [String: Any] else { return (false, "Không thể kết nối đến dịch vụ nhắc hẹn.") }
         let ok = root["ok"] as? Bool ?? false
-        if ok { return (true, nil) }
+        if ok {
+            deletedReminderIds.insert(messageId)
+            return (true, nil)
+        }
         let err = root["error"] as? String ?? ""
+        if err == "already-deleted" {
+            deletedReminderIds.insert(messageId)
+            return (false, "Nhắc hẹn đã bị xóa trước đó.")
+        }
         let msg = switch err {
         case "forbidden": "Bạn không có quyền xóa nhắc hẹn này."
-        case "already-deleted": "Nhắc hẹn đã bị xóa trước đó."
         default: "Không thể xóa nhắc hẹn lúc này. Vui lòng thử lại sau."
         }
         return (false, msg)
