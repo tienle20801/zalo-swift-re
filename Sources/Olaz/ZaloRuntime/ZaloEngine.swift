@@ -43,11 +43,14 @@ final class ZaloEngine {
         var isSecondQR = false
     }
 
-    struct Profile: Equatable {
+    struct Profile: Equatable, Sendable {
         var userId: String
         var displayName: String
         var avatar: URL?
         var phone: String?
+        var gender: Int? = nil
+        var dob: TimeInterval? = nil
+        var status: String? = nil
     }
 
     /// A conversation as the official client knows it (conv-info-manager + profiles).
@@ -120,6 +123,12 @@ final class ZaloEngine {
     internal(set) var contacts = ContactsState()
     /// Notification preferences mirrored from the official client (ZaloEngine+Notifications.swift).
     internal(set) var notificationSettings = NotificationSettingsState()
+    /// Privacy settings and blocklist (ZaloEngine+Privacy.swift).
+    var privacySettings: PrivacySettings?
+    var privacyLoading = false
+    var privacyError: String?
+    var blockedUsers: [BlockedUser] = []
+    var blockedUsersLoaded = false
     /// zCloud: plan, quota / usage, conversations with cloud data, settings (ZaloEngine+Cloud.swift).
     internal(set) var cloud = CloudState()
     /// Voice / video calls: renderer support, native helper status, incoming call (ZaloEngine+CallHook.swift).
@@ -322,10 +331,15 @@ final class ZaloEngine {
         refreshQR()
     }
 
+    func applyProfile(_ next: Profile) {
+        profile = next
+        scheduleSnapshotSave()
+    }
+
     /// Logout (from this app or the server's): every per-account value goes, so nothing of the previous account — messages,
     /// contacts, mutes, drafts, banners, a transfer or call prompt — shows up in, or acts for, the next one. Device-level
     /// values (runtime phase, macOS permission, native call-helper process, engine log) stay.
-    private func resetAccountState() {
+    func resetAccountState() {
         hasCompletedInitialLiveSync = false
         profile = nil
         // Conversation list.
@@ -363,6 +377,7 @@ final class ZaloEngine {
         resetStickers()
         resetComposer()
         resetMessageActions()
+        resetPrivacyState()
         mediaResolver.reset()
         NativeNotifier.shared.resetForLogout()
     }
@@ -415,7 +430,7 @@ final class ZaloEngine {
         }
     }
 
-    private func handle(state: [String: Any]) {
+    internal func handle(state: [String: Any]) {
         EngineLog.shared.write("state page=\(state["page"] ?? "-") event=\(state["event"] ?? "-") keys=\(state.keys.sorted())")
         switch state["page"] as? String {
         case "login":
@@ -450,14 +465,9 @@ final class ZaloEngine {
             mergeConversations(state)
             scheduleSnapshotSave()
         case "main":
-            if let user = state["user"] as? [String: Any], let id = user["userId"] as? String, !id.isEmpty {
-                profile = Profile(
-                    userId: id,
-                    displayName: user["displayName"] as? String ?? user["zaloName"] as? String ?? "",
-                    avatar: (user["avatar"] as? String).flatMap(URL.init(string:)),
-                    phone: user["phoneNumber"] as? String
-                )
-                scheduleSnapshotSave()
+            if let user = state["user"] as? [String: Any],
+               let next = Profile.parse(user: user, fallback: profile) {
+                applyProfile(next)
             }
         default:
             break

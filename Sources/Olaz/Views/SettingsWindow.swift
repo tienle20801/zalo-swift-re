@@ -15,7 +15,7 @@ struct SettingsView: View {
                 SettingsPane(height: 440) { NotificationSettingsView() }
             }
             Tab("Quyền riêng tư", systemImage: "lock") {
-                SettingsPane(height: 300) { PrivacySettings() }
+                SettingsPane(height: 520) { PrivacySettingsTab() }
             }
             Tab("Sticker", systemImage: "face.smiling") {
                 SettingsPane(height: 160) { StickerSettingsSection() }
@@ -72,21 +72,11 @@ private struct GeneralSettings: View {
 
 // MARK: - Quyền riêng tư
 
-/// Hidden-chat setup. The official section only exists once the adapter published and the feature is on, so the tab says why
-/// it is empty otherwise.
-private struct PrivacySettings: View {
-    @Environment(ZaloEngine.self) private var engine
-
+/// Official privacy preferences, blocklist management, and hidden-chat PIN setup.
+private struct PrivacySettingsTab: View {
     var body: some View {
-        let state = engine.conversationActions
-        if state.loaded, state.hiddenEnabled {
-            HiddenChatSettingsSection()
-        } else {
-            Section("Thiết lập ẩn trò chuyện") {
-                Text(state.loaded ? "Tính năng ẩn trò chuyện chưa được bật cho tài khoản này." : "Đang tải thiết lập từ Zalo…")
-                    .foregroundStyle(.secondary)
-            }
-        }
+        PrivacySettingsSections()
+        HiddenChatSettingsSection()
     }
 }
 
@@ -95,29 +85,42 @@ private struct PrivacySettings: View {
 private struct AccountSettings: View {
     @Environment(ZaloEngine.self) private var engine
     @State private var confirmSQLite = false
+    @State private var showingProfileEditor = false
 
     var body: some View {
         Section {
-            HStack(spacing: 14) {
-                if let profile = engine.profile {
-                    RemoteAvatar(url: profile.avatar, name: profile.displayName, size: 52)
-                } else {
-                    Image(systemName: "person.crop.circle.fill")
-                        .font(.system(size: 52))
-                        .foregroundStyle(.tertiary)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(engine.profile?.displayName ?? "Chưa đăng nhập")
-                        .font(.system(size: 15, weight: .semibold))
-                    if let phone = engine.profile?.phone, !phone.isEmpty {
-                        Text(phone).font(.callout).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                HStack(spacing: 14) {
+                    if let profile = engine.profile {
+                        RemoteAvatar(url: profile.avatar, name: profile.displayName, size: 52)
                     } else {
-                        Text("Tài khoản Zalo").font(.callout).foregroundStyle(.secondary)
+                        Image(systemName: "person.crop.circle.fill")
+                            .font(.system(size: 52))
+                            .foregroundStyle(.tertiary)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(engine.profile?.displayName ?? "Chưa đăng nhập")
+                            .font(.system(size: 15, weight: .semibold))
+                        if let phone = engine.profile?.phone, !phone.isEmpty {
+                            Text(phone).font(.callout).foregroundStyle(.secondary)
+                        } else {
+                            Text("Tài khoản Zalo").font(.callout).foregroundStyle(.secondary)
+                        }
+                        if let status = engine.profile?.status, !status.isEmpty {
+                            Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                 }
+                .accessibilityElement(children: .combine)
+                Spacer()
+                Button("Chỉnh sửa hồ sơ…") { showingProfileEditor = true }
+                    .disabled(engine.profile == nil)
             }
             .padding(.vertical, 4)
-            .accessibilityElement(children: .combine)
+        }
+        .sheet(isPresented: $showingProfileEditor) {
+            ProfileEditorSheet()
+                .environment(engine)
         }
         Section("Sao lưu & đồng bộ") {
             LabeledContent("Đồng bộ tin nhắn từ điện thoại") {
