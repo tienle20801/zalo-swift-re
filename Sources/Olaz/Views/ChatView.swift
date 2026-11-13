@@ -20,13 +20,10 @@ struct ChatView: View {
     @State private var columnWidth: CGFloat = 400
     /// A loaded message to bring on screen (a pin of the pinned bar).
     @State private var jumpTarget: String?
-<<<<<<< HEAD
     @State private var isDropTargeted = false
-=======
     /// The account the unsent draft belongs to (captured when it was restored): after a logout the view is torn down
     /// with the previous account's text, which must not be saved into the next account's drafts.
     @State private var draftOwner: String?
->>>>>>> f540b13 (feat(chat): keep the unsent draft per conversation)
 
     private enum SendNotice { case restored, like }
 
