@@ -371,6 +371,7 @@ final class ZaloEngine {
         calls.nativeState = call.nativeState
         call = calls
         CardActionCenter.shared.reset()
+        MessageTranslationStore.shared.clearAll()
         resetCardState()
         resetCloud()
         resetPolls()

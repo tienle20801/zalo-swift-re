@@ -6,7 +6,7 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             Tab("Chung", systemImage: "gearshape") {
-                SettingsPane(height: 210) { GeneralSettings() }
+                SettingsPane(height: 320) { GeneralSettings() }
             }
             Tab("Giao diện", systemImage: "paintpalette") {
                 SettingsPane(height: 700) { AppearanceSettings() }
@@ -51,6 +51,7 @@ private struct GeneralSettings: View {
             }
             .pickerStyle(.segmented)
         }
+        TranslationSettingsSection()
         // Only a bundled app has a version; a bare `swift run` binary has none to show.
         if let version = Self.version {
             Section("Về \(AppBrand.name)") {
