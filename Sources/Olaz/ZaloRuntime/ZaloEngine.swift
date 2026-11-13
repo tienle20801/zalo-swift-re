@@ -149,6 +149,8 @@ final class ZaloEngine {
     var deletedReminderIds: Set<String> = []
     /// Message actions in flight ("conv|msg|action"): a second click while one runs is ignored.
     @ObservationIgnored internal var messageActionsBusy: Set<String> = []
+    /// Unsent composer text per conversation, kept while switching conversations (ZaloEngine+Drafts.swift). In memory only.
+    @ObservationIgnored internal var conversationDrafts = ConversationDraftStore()
 
     @ObservationIgnored internal var host: OfficialClientHost?
     /// Dedupes/throttles `resolveMedia` (ZaloEngine+Media.swift).
@@ -338,6 +340,7 @@ final class ZaloEngine {
         openConversationId = nil
         resetChatState()
         failedDrafts = FailedDraftStore()   // unsent text of the previous account must not show up in the next one
+        conversationDrafts = ConversationDraftStore()
         transfer = nil
         canStartTransfer = false
         transferStartBlockedReason = nil
