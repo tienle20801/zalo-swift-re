@@ -817,7 +817,7 @@ final class ZaloEngine {
         EngineLog.shared.write("snapshot: restored \(snapshot.conversations.count) conversations, \(snapshot.hiddenIds.count) hidden, \(snapshot.flags.count) flags, archived=\(snapshot.archivedEnabled), listIds=\(snapshot.listIds.count)")
     }
 
-    static func decodeDataURL(_ url: String) -> Data? {
+    nonisolated static func decodeDataURL(_ url: String) -> Data? {
         guard url.hasPrefix("data:"), let comma = url.firstIndex(of: ",") else { return nil }
         let header = url[..<comma].lowercased()
         let payload = String(url[url.index(after: comma)...])

@@ -493,8 +493,9 @@ extension ZaloEngine {
 
     private func composeWithFiles(_ method: String, _ args: [Any], files: [URL]) async -> ComposerOutcome {
         guard !files.isEmpty else { return .cancelled }
+        EngineLog.shared.write("compose \(method) start files=\(files.count)")
         // Photos are processed (resized) before the call returns; the uploads themselves continue in the page.
-        let answer = await raceTimeout(45) { [self] in JSBox(value: await callCompose(method, args, files: files)) }
+        let answer = await raceTimeout(180) { [self] in JSBox(value: await callCompose(method, args, files: files)) }
         guard let answer else {
             EngineLog.shared.write("compose \(method) files=\(files.count) → timeout")
             return .pending(CardActionOutcome.noAnswerText)
