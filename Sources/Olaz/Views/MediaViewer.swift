@@ -847,6 +847,29 @@ private struct MediaViewerContent: View {
                 ocrControls
                 ZoomControls(zoom: state.zoom)
             }
+            HStack(spacing: 6) {
+                Button(action: showInFinder) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .help("Hiển thị trong Finder")
+                .accessibilityLabel("Hiển thị trong Finder")
+
+                Button(action: saveAs) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 32, height: 32)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .glassEffect(.regular.interactive(), in: Circle())
+                .help("Lưu về máy")
+                .accessibilityLabel("Lưu về máy")
+            }
         }
         .padding(.leading, state.titlebar.leading)
         .padding(.trailing, 16)
@@ -938,6 +961,32 @@ private struct MediaViewerContent: View {
             parts.append(name)
         }
         return parts.joined(separator: " · ")
+    }
+
+    private func showInFinder() {
+        Task {
+            switch item.media {
+            case .photo(let url, _, _, _):
+                await ChatFiles.showPhotoInFinder(url: url, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            case .video(let file, _):
+                await ChatFiles.showVideoInFinder(url: nil, localFile: file, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            case .remoteVideo(let url, _, _, _):
+                await ChatFiles.showVideoInFinder(url: url, localFile: nil, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            }
+        }
+    }
+
+    private func saveAs() {
+        Task {
+            switch item.media {
+            case .photo(let url, _, _, _):
+                await ChatFiles.savePhotoAs(url: url, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            case .video(let file, _):
+                await ChatFiles.saveVideoAs(url: nil, localFile: file, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            case .remoteVideo(let url, _, _, _):
+                await ChatFiles.saveVideoAs(url: url, localFile: nil, conversationId: item.conversationId, messageId: item.messageId, date: item.date, engine: engine)
+            }
+        }
     }
 }
 
