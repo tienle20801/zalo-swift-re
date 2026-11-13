@@ -614,8 +614,23 @@ final class ComposerHandle {
     var conversationId: String = ""
 
     func insertMention(_ candidate: MentionCandidate, replacing range: NSRange) {
-        guard let tv = textView, let storage = tv.textStorage,
-              NSMaxRange(range) <= storage.length,
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        var range = range
+        if tv.hasMarkedText() {
+            // A half-typed Telex syllable: commit it first, or replacing under the input method garbles the text. The committed
+            // syllable belongs to the "@query", so the replaced range runs up to the caret.
+            // Commit in the field as shown, then reset the input method so it does not keep composing on the old syllable.
+            tv.unmarkText()
+            tv.inputContext?.discardMarkedText()
+            let caret = tv.selectedRange()
+            if caret.length == 0, caret.location > NSMaxRange(range), caret.location <= storage.length,
+               range.location < storage.length,
+               (storage.string as NSString).substring(with: NSRange(location: range.location, length: caret.location - range.location))
+                   .rangeOfCharacter(from: .newlines) == nil {
+                range.length = caret.location - range.location
+            }
+        }
+        guard NSMaxRange(range) <= storage.length, range.location < storage.length,
               (storage.string as NSString).character(at: range.location) == 0x40 else { return }
         let label = "@" + candidate.name.replacingOccurrences(of: "\n", with: " ")
         let token = MentionToken(uid: candidate.isAll ? "-1" : candidate.id, label: label, isAll: candidate.isAll)
@@ -797,7 +812,9 @@ struct ComposerTextView: NSViewRepresentable {
         tv.autoresizingMask = [.width]
         tv.textContainer?.widthTracksTextView = true
         tv.setAccessibilityLabel("Nhập tin nhắn")
+        context.coordinator.applyingExternal = true
         Self.setContent(tv, text: text, mentions: mentions)
+        context.coordinator.applyingExternal = false
         context.coordinator.parent.handle?.textView = tv
         tv.hasStagedImages = hasStagedImages
         tv.onWidthChange = { [weak coordinator = context.coordinator, weak tv] in
@@ -839,8 +856,12 @@ struct ComposerTextView: NSViewRepresentable {
             context.coordinator.deferExternal(base: tv.string, text: text, mentions: mentions)
         } else if tv.string != text {
             context.coordinator.pending = nil
+            // During a view update: the selection change `setContent` causes must not publish state (the async refresh below does).
+            context.coordinator.applyingExternal = true
             Self.setContent(tv, text: text, mentions: mentions)
-            tv.undoManager?.removeAllActions()
+            context.coordinator.applyingExternal = false
+            // The field's own undo manager (`undoManager(for:)`): other fields of the window keep their undo history.
+            context.coordinator.undo.removeAllActions()
             DispatchQueue.main.async { [weak coordinator = context.coordinator, weak tv] in
                 guard let tv else { return }
                 coordinator?.syncMentions(tv)
@@ -857,7 +878,15 @@ struct ComposerTextView: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
         var lastFocusTick = 0
+        /// Set while `textView(_:shouldChangeTextIn:)` widens an edit to a whole mention token (re-entrancy guard).
+        private var expandingMention = false
+        /// Set while text from outside is put into the field (`setContent`): its selection change publishes nothing.
+        var applyingExternal = false
+        /// The field's own undo stack, so clearing it after an external content change leaves other fields' undo alone.
+        let undo = UndoManager()
         init(_ parent: ComposerTextView) { self.parent = parent }
+
+        func undoManager(for view: NSTextView) -> UndoManager? { undo }
 
         /// Text set from outside (restored draft) while composing: `base` is what the field held then.
         var pending: (base: String, text: String, mentions: [Mention])?
@@ -874,13 +903,18 @@ struct ComposerTextView: NSViewRepresentable {
             let current = tv.string
             let baseLen = (p.base as NSString).length, currentLen = (current as NSString).length
             var text = p.text, mentions = p.mentions
-            if current != p.base, p.text.hasPrefix(p.base) {
+            // UTF-16 prefix test, consistent with the NSString offsets below (`String.hasPrefix` compares grapheme clusters).
+            if current != p.base, (p.text as NSString).hasPrefix(p.base) {
                 text = current + (p.text as NSString).substring(from: baseLen)
                 mentions = currentMentions(tv) + p.mentions.filter { $0.pos >= baseLen }.map {
                     Mention(uid: $0.uid, pos: $0.pos + currentLen - baseLen, len: $0.len, isAll: $0.isAll)
                 }
             }
+            applyingExternal = true
             ComposerTextView.setContent(tv, text: text, mentions: mentions)
+            applyingExternal = false
+            // The undo stack recorded edits of the replaced text: ⌘Z would apply them to ranges that no longer exist.
+            undo.removeAllActions()
         }
 
         func textDidChange(_ notification: Notification) {
@@ -900,11 +934,16 @@ struct ComposerTextView: NSViewRepresentable {
             guard let tv = notification.object as? NSTextView else { return }
             // Typing next to a mention must never extend it.
             tv.typingAttributes = ComposerTextView.baseAttributes
+            // Content set from outside (possibly inside a view update): the caller refreshes the query afterwards.
+            if applyingExternal { return }
             refreshQuery(tv)
         }
 
         /// A mention is atomic: any edit touching it replaces/deletes the whole token.
         func textView(_ tv: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+            // `tv.shouldChangeText(in:)` below asks this delegate again for the expanded range, which still overlaps the
+            // token: without this guard it expands and asks again forever (stack overflow on ⌫ next to a mention).
+            if expandingMention { return true }
             guard let storage = tv.textStorage, storage.length > 0, !tv.hasMarkedText() else { return true }
             var expanded = range
             var touched = false
@@ -917,6 +956,8 @@ struct ComposerTextView: NSViewRepresentable {
             }
             guard touched, expanded.location != NSNotFound else { return true }
             let replacement = NSAttributedString(string: replacementString ?? "", attributes: ComposerTextView.baseAttributes)
+            expandingMention = true
+            defer { expandingMention = false }
             guard tv.shouldChangeText(in: expanded, replacementString: replacement.string) else { return false }
             storage.replaceCharacters(in: expanded, with: replacement)
             tv.didChangeText()
@@ -998,7 +1039,9 @@ struct ComposerTextView: NSViewRepresentable {
             switch selector {
             case #selector(NSResponder.moveUp(_:)): if parent.onSuggestionKey(.up) { return true }
             case #selector(NSResponder.moveDown(_:)): if parent.onSuggestionKey(.down) { return true }
-            case #selector(NSResponder.insertTab(_:)): if parent.onSuggestionKey(.confirm) { return true }
+            case #selector(NSResponder.insertTab(_:)):
+                // Like Return: never confirm a mention under an open IME composition.
+                if !textView.hasMarkedText(), parent.onSuggestionKey(.confirm) { return true }
             case #selector(NSResponder.cancelOperation(_:)): if parent.onSuggestionKey(.cancel) { return true }
             default:
                 if isReturn {
