@@ -186,7 +186,18 @@ struct MessageRow: View {
 
     private var mine: Bool { message.isMine }
     private var hasWallpaper: Bool { wallpaperStored != ChatWallpaper.none.rawValue }
+    private var translationStore: MessageTranslationStore { .shared }
+    private var translationState: MessageTranslationState {
+        message.translatableText == nil ? .idle : translationStore.state(for: message)
+    }
     private func scaled(_ size: CGFloat) -> CGFloat { size * textScale }
+    private func toggleTranslation() {
+        if translationState.isActiveOrVisible {
+            translationStore.collapse(conversationId: message.conversationId, messageId: message.id)
+        } else {
+            translationStore.translate(message: message)
+        }
+    }
 
     var body: some View {
         switch message.kind {
@@ -230,6 +241,27 @@ struct MessageRow: View {
                         .padding(.leading, hasWallpaper ? 4 : 12)
                 }
                 bubbleStack
+                if message.translatableText != nil, translationState.showsCard {
+                    MessageTranslationCard(
+                        message: message,
+                        state: translationState,
+                        mine: mine,
+                        allowCopy: MessageTranslationStore.allowsCopy(for: message),
+                        onSelectLanguage: { targetCode in
+                            translationStore.translate(message: message, targetCode: targetCode)
+                        },
+                        onCopy: { translatedText in
+                            engine.copyText(translatedText, in: message.conversationId)
+                        },
+                        onHide: {
+                            translationStore.collapse(conversationId: message.conversationId, messageId: message.id)
+                        },
+                        onRetry: {
+                            translationStore.retry(message: message)
+                        }
+                    )
+                    .padding(.top, 2)
+                }
                 if mine && showStatus { statusLine }
             }
             .frame(maxWidth: 520, alignment: mine ? .trailing : .leading)
@@ -307,6 +339,12 @@ struct MessageRow: View {
                         }
                     }
                 barButton("Trả lời", symbol: "arrowshape.turn.up.left") { onReply(message) }
+                if message.translatableText != nil {
+                    let showing = translationState.isActiveOrVisible
+                    barButton(showing ? "Ẩn bản dịch" : "Dịch tin nhắn", symbol: "translate") {
+                        toggleTranslation()
+                    }
+                }
                 if message.menu.forward == .available {
                     barButton("Chia sẻ", symbol: "arrowshape.turn.up.right") { engine.requestForward(message) }
                 }
@@ -401,6 +439,17 @@ struct MessageRow: View {
                     Button("Copy chú thích", systemImage: "text.quote") { engine.copyText(caption, in: message.conversationId) }
                 }
             }
+            if message.translatableText != nil {
+                if translationState.isActiveOrVisible {
+                    Button("Ẩn bản dịch", systemImage: "eye.slash") {
+                        translationStore.collapse(conversationId: message.conversationId, messageId: message.id)
+                    }
+                } else {
+                    Button("Dịch tin nhắn", systemImage: "translate") {
+                        translationStore.translate(message: message)
+                    }
+                }
+            }
             Menu("Biểu cảm", systemImage: "face.smiling") {
                 ForEach(Self.reactionEmojis, id: \.self) { emoji in
                     Button(emoji) { onReact(emoji, message) }
@@ -465,9 +514,18 @@ struct MessageRow: View {
                         .background(.black.opacity(0.5), in: Capsule()).padding(8)
                 }
         case .video(let thumbnail, let duration, let url):
-            VideoThumb(thumbnail: thumbnail, duration: duration, url: url, conversationId: message.conversationId, messageId: message.id,
-                       senderName: mine ? "Bạn" : message.senderName, date: message.date,
-                       encrypted: message.isE2EE || url?.query?.contains("e2esession") == true)
+            if message.caption != nil {
+                VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
+                    VideoThumb(thumbnail: thumbnail, duration: duration, url: url, conversationId: message.conversationId, messageId: message.id,
+                               senderName: mine ? "Bạn" : message.senderName, date: message.date,
+                               encrypted: message.isE2EE || url?.query?.contains("e2esession") == true)
+                    caption
+                }
+            } else {
+                VideoThumb(thumbnail: thumbnail, duration: duration, url: url, conversationId: message.conversationId, messageId: message.id,
+                           senderName: mine ? "Bạn" : message.senderName, date: message.date,
+                           encrypted: message.isE2EE || url?.query?.contains("e2esession") == true)
+            }
         case .recalled:
             bubble(muted: true) {
                 Text("Tin nhắn đã được thu hồi").font(.system(size: scaled(13.5))).italic()

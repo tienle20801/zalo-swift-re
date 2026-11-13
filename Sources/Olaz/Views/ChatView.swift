@@ -141,6 +141,7 @@ struct ChatView: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { columnWidth = $0 }
         .cardActionPresenter()
         .messageActionPresenter(conversationId: id)
+        .olazTranslationHost()
         .onAppear {
             focusTick += 1
             // Saved draft first, then a failed send on top of it: the failed text is always put back (`restoreFailedDraft`).
@@ -149,7 +150,27 @@ struct ChatView: View {
             markReadIfNeeded(last: loaded?.last, newIncomingOnly: false)
         }
         // `.id(conversation.id)` tears this view down on every switch: the unsent text goes to the engine.
-        .onDisappear { saveDraft(for: id) }
+        .onDisappear {
+            saveDraft(for: id)
+            if engine.profile?.userId == nil || engine.phase.isLogin {
+                MessageTranslationStore.shared.clearAll()
+            } else if engine.conversationActions.isHidden(id) {
+                MessageTranslationStore.shared.clearConversation(id)
+            }
+        }
+        .onChange(of: engine.profile?.userId, initial: true) { _, userId in
+            MessageTranslationStore.shared.syncActiveAccount(userId)
+        }
+        .onChange(of: engine.phase) { _, phase in
+            if phase.isLogin {
+                MessageTranslationStore.shared.clearAll()
+            }
+        }
+        .onChange(of: engine.conversationUI.unlockedId) { old, new in
+            if let old, old != new, engine.conversationActions.isHidden(old) {
+                MessageTranslationStore.shared.clearConversation(old)
+            }
+        }
         .onChange(of: id) { old, new in
             // Defensive: the same view reused for another conversation.
             saveDraft(for: old)
