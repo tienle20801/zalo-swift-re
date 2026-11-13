@@ -241,6 +241,144 @@ struct MessageTranslationTests {
         #expect(store.state(for: regular) == .translated(text: "T:Public message text", sourceCode: "en", targetCode: "vi"))
     }
 
+    @Test func hidingConversationPurgesTranslationsImmediatelyAndOnConvActionsUpdates() async {
+        let (defaults, suite) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let mock = MockTranslator { text, src, tgt in
+            .translated(text: "T:\(text)", sourceCode: src ?? "en", targetCode: tgt)
+        }
+        let store = MessageTranslationStore(defaults: defaults, backend: mock)
+        let engine = ZaloEngine()
+
+        let localHideMsg = makeMessage(id: "m1", conversationId: "conv-local-hide", text: "Private local conversation")
+        let remoteHideMsg = makeMessage(id: "m2", conversationId: "conv-remote-hide", text: "Private remote conversation")
+        let flagHideMsg = makeMessage(id: "m3", conversationId: "conv-flag-hide", text: "Private flag conversation")
+        let regularMsg = makeMessage(id: "m4", conversationId: "conv-regular", text: "Public regular conversation")
+
+        for msg in [localHideMsg, remoteHideMsg, flagHideMsg, regularMsg] {
+            store.translate(message: msg)
+        }
+        await settle {
+            [localHideMsg, remoteHideMsg, flagHideMsg, regularMsg].allSatisfy {
+                if case .translated = store.state(for: $0) { return true }
+                return false
+            }
+        }
+
+        // 1. Local hide result removes UI selection & purges translations BEFORE convActions publishes hiddenIds.
+        engine.conversationUI.unlock("conv-local-hide")
+        #expect(!engine.conversationActions.isHidden("conv-local-hide"))
+        engine.applyHiddenConversation("conv-local-hide", translationStore: store)
+        #expect(engine.conversationUI.removal?.ids.contains("conv-local-hide") == true)
+        #expect(!engine.conversationUI.isUnlocked("conv-local-hide"))
+        #expect(store.state(for: localHideMsg) == .idle)
+        #expect(store.state(for: remoteHideMsg).showsCard)
+        #expect(store.state(for: regularMsg).showsCard)
+
+        // 2. Cross-device or delayed hidden.ids update purges newly hidden conversation without touching visible ones.
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "hidden": [
+                        "enabled": true,
+                        "hasPin": true,
+                        "ids": ["conv-local-hide", "conv-remote-hide"]
+                    ]
+                ]
+            ],
+            translationStore: store
+        )
+        #expect(store.state(for: remoteHideMsg) == .idle)
+        #expect(store.state(for: flagHideMsg).showsCard)
+        #expect(store.state(for: regularMsg).showsCard)
+
+        // 3. Flag bit .hidden (even without hidden.ids entry) also purges newly hidden conversations.
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "flags": [
+                        "conv-flag-hide": ConversationActionFlags.hidden.rawValue
+                    ],
+                    "left": [:],
+                    "markUnread": false
+                ]
+            ],
+            translationStore: store
+        )
+        #expect(store.state(for: flagHideMsg) == .idle)
+        #expect(store.state(for: regularMsg) == .translated(text: "T:Public regular conversation", sourceCode: "en", targetCode: "vi"))
+
+        // 4. Re-translating an unlocked already-hidden conversation is not wiped by routine convActions updates
+        // that do not newly transition the ID into hidden, whereas unhide -> re-hide purges again.
+        store.translate(message: remoteHideMsg)
+        await settle {
+            if case .translated = store.state(for: remoteHideMsg) { return true }
+            return false
+        }
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "hidden": [
+                        "enabled": true,
+                        "hasPin": true,
+                        "ids": ["conv-local-hide", "conv-remote-hide"]
+                    ]
+                ]
+            ],
+            translationStore: store
+        )
+        #expect(store.state(for: remoteHideMsg).showsCard)
+
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "hidden": [
+                        "enabled": true,
+                        "hasPin": true,
+                        "ids": ["conv-local-hide"]
+                    ]
+                ]
+            ],
+            translationStore: store
+        )
+        #expect(store.state(for: remoteHideMsg).showsCard)
+
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "hidden": [
+                        "enabled": true,
+                        "hasPin": true,
+                        "ids": ["conv-local-hide", "conv-remote-hide"]
+                    ]
+                ]
+            ],
+            translationStore: store
+        )
+        #expect(store.state(for: remoteHideMsg) == .idle)
+
+        // 5. Default 1-arg handleConversationActions(state:) routes through MessageTranslationStore.shared.
+        let sharedConvId = "conv-shared-hidden-\(UUID().uuidString)"
+        let sharedMsg = makeMessage(id: "m-shared", conversationId: sharedConvId, text: "Confidential shared store text")
+        defer { MessageTranslationStore.shared.clearConversation(sharedConvId) }
+        MessageTranslationStore.shared.translate(message: sharedMsg)
+        #expect(MessageTranslationStore.shared.state(for: sharedMsg) != .idle)
+
+        engine.handleConversationActions(
+            state: [
+                "convActions": [
+                    "hidden": [
+                        "enabled": true,
+                        "hasPin": true,
+                        "ids": ["conv-local-hide", "conv-remote-hide", sharedConvId]
+                    ]
+                ]
+            ]
+        )
+        #expect(MessageTranslationStore.shared.state(for: sharedMsg) == .idle)
+    }
+
     // MARK: - Eligibility & default target preference
 
     @Test func translatableTextCoversTextLinkPhotoVideoIncludingE2EE() {

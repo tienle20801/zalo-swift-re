@@ -156,6 +156,12 @@
     if (!name || (gender !== 0 && gender !== 1) || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
       return { ok: false, errorCode: null, error: 'Thông tin hồ sơ chưa hợp lệ.' };
     }
+    const fallbackDob = (() => {
+      const parts = dob.split('-').map(Number);
+      if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return undefined;
+      const dt = new Date(parts[0], parts[1] - 1, parts[2]);
+      return Number.isNaN(dt.getTime()) ? undefined : Math.trunc(dt.getTime() / 1000);
+    })();
     try {
       await Promise.resolve(svc.updateProfileMe({ name, gender, dob }));
       let refreshed = null;
@@ -163,7 +169,7 @@
       zlog('updateProfile ok');
       return {
         ok: true,
-        profile: normalizeProfile(refreshed, { displayName: name, gender }),
+        profile: normalizeProfile(refreshed, { displayName: name, gender, dob: fallbackDob }),
       };
     } catch (err) {
       const res = extractErr(err);

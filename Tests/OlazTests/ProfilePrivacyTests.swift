@@ -350,6 +350,46 @@ import Testing
     }
 
     @MainActor
+    @Test func profileAdapterFallsBackToSubmittedDobWhenRefreshFails() throws {
+        let h = ScriptHarness(prelude: """
+        window.webkit = { messageHandlers: { zlog: { postMessage: function () {} } } };
+        window.__zaloStore = {
+          getState: function () {
+            return {
+              user: {
+                userId: 'me1',
+                displayName: 'Tên Cũ',
+                gender: 0,
+                dob: 820454400,
+                status: 'Bio cũ'
+              }
+            };
+          }
+        };
+        var uiPd = {
+          getProfileMe: function () { return Promise.reject({ error_code: 500 }); },
+          updateProfileMe: function () { return Promise.resolve({}); },
+          updateMyAvatar: function () { return Promise.resolve({}); }
+        };
+        window.__zaloRequire = { c: { UiPd: { exports: { default: uiPd } } } };
+        """)
+        h.load("profile-adapter.js")
+
+        let res = try #require(h.run("upd", "window.__olazProfile.updateProfile({ name: 'Tên Mới', gender: 1, dob: '2000-06-15' })"))
+        #expect(res["ok"] as? Bool == true)
+        let profDict = try #require(res["profile"] as? [String: Any])
+        #expect(profDict["displayName"] as? String == "Tên Mới")
+        #expect(profDict["gender"] as? Int == 1)
+        let dobSeconds = try #require((profDict["dob"] as? NSNumber)?.doubleValue)
+        #expect(dobSeconds != 820_454_400)
+
+        let parsed = try #require(ZaloEngine.Profile.parse(user: profDict))
+        let dobDate = try #require(parsed.dobDate)
+        #expect(ZaloEngine.Profile.formatDOB(dobDate) == "2000-06-15")
+        #expect(h.failures.isEmpty)
+    }
+
+    @MainActor
     @Test func privacyAdapterContractSettingsBlocklistAndBlockToggle() throws {
         let h = ScriptHarness(prelude: """
         var logs = [];
