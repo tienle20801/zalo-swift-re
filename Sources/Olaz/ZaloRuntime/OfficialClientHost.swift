@@ -327,25 +327,30 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
         self.root = root
     }
 
+    /// Rejects requests carrying an explicit non-app `Origin` header (e.g., cross-origin subframes).
+    private func rejectsCrossOrigin(_ task: any WKURLSchemeTask, url: URL, endpoint: String) -> Bool {
+        guard let origin = task.request.value(forHTTPHeaderField: "Origin"),
+              origin.lowercased() != OfficialClientHost.appOrigin else { return false }
+        hostLog.error("\(endpoint, privacy: .public) refused for origin \(origin, privacy: .public)")
+        task.didReceive(HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: [:])!)
+        task.didFinish()
+        return true
+    }
+
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
         guard let url = task.request.url else { return }
         // Same-origin endpoint: index.html's CSP (`connect-src 'self' …`) blocks other hosts.
         if url.path() == Self.bridgeSyncPath {
             // Issue #1: a cross-origin frame can send a CORS "simple" POST here (text body, no preflight); such a
             // request always carries its `Origin`. The renderer's own XHRs carry `zalo-app://local` or none.
-            if let origin = task.request.value(forHTTPHeaderField: "Origin"),
-               origin.lowercased() != OfficialClientHost.appOrigin {
-                hostLog.error("bridge-sync refused for origin \(origin, privacy: .public)")
-                task.didReceive(HTTPURLResponse(url: url, statusCode: 403, httpVersion: "HTTP/1.1", headerFields: [:])!)
-                task.didFinish()
-                return
-            }
+            if rejectsCrossOrigin(task, url: url, endpoint: "bridge-sync") { return }
             let body = task.request.httpBody ?? Data()
             let data = MainActor.assumeIsolated { bridge?.handleSyncRequest(body) } ?? Data("{}".utf8)
             respond(task, url: url, data: data, mime: "application/json", crossOrigin: false)
             return
         }
         if url.path() == Self.pendingFilesPath || url.path().hasPrefix(Self.pendingFilesPrefix) {
+            if rejectsCrossOrigin(task, url: url, endpoint: "pending-files") { return }
             let token = url.path().hasPrefix(Self.pendingFilesPrefix)
                 ? String(url.path().dropFirst(Self.pendingFilesPrefix.count))
                 : ""
@@ -366,10 +371,11 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
                 ]
             }
             let data = (try? JSONSerialization.data(withJSONObject: list)) ?? Data("[]".utf8)
-            respond(task, url: url, data: data, mime: "application/json")
+            respond(task, url: url, data: data, mime: "application/json", crossOrigin: false)
             return
         }
         if url.path().hasPrefix(Self.pendingFilePrefix) {
+            if rejectsCrossOrigin(task, url: url, endpoint: "pending-file") { return }
             let tail = String(url.path().dropFirst(Self.pendingFilePrefix.count))
             let parts = tail.split(separator: "/", omittingEmptySubsequences: true)
             let urls: [URL]
@@ -384,7 +390,7 @@ final class AsarSchemeHandler: NSObject, WKURLSchemeHandler {
             }
             if let index = indexOpt, urls.indices.contains(index),
                let data = try? Data(contentsOf: urls[index]) {
-                respond(task, url: url, data: data, mime: Self.mime(for: urls[index].path))
+                respond(task, url: url, data: data, mime: Self.mime(for: urls[index].path), crossOrigin: false)
                 return
             }
             task.didReceive(HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: [:])!)
