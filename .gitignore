@@ -3,12 +3,16 @@
 
 # SwiftPM / Xcode build output
 .build/
-.agy/transcripts/
 build/
 DerivedData/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 .swiftpm/
+
+# Local AI agent memory, scratchpad, transcripts, and graphify output
+.agy/
+AGY.md
+graphify-out/
 
 # Editor / local tool config (may contain secrets)
 .claude/
