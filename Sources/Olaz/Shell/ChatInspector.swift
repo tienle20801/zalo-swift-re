@@ -17,6 +17,13 @@ struct ChatInspector: View {
     @State private var reminderSheet: ReminderRequest?
     @State private var reminderComposeInfo: ReminderComposeInfo?
     @State private var showAllReminders = false
+    @State private var groupAdmin: GroupAdminState?
+    @State private var groupNotes: [GroupNoteItem] = []
+    @State private var showNoteCreate = false
+    @State private var newNoteTitle = ""
+    @State private var autoDeleteTTL = 0
+    @State private var groupActionBusy = false
+    @State private var groupActionFeedback: String?
     /// Width of the overview's scroll view itself (not of its content, see `SharedMediaGrid`).
     @State private var outerWidth: CGFloat = 300
     /// Photos / files / links ever shared, read from the official media service (the overview shows the newest of each).
@@ -44,12 +51,16 @@ struct ChatInspector: View {
             }
         }
         // On the container, not the overview: leaving for the storage page must not restart these.
-        .task(id: id) { await loadMembers() }
+        .task(id: id) {
+            await loadMembers()
+            await loadAdminExtras()
+        }
         .task(id: engine.messages[id]?.last?.id) { await refreshPreview() }
         .sheet(item: $pollSheet) { poll in
             PollDetailSheet(pollId: poll.pollId, conversationId: id, question: poll.question)
         }
         .sheet(isPresented: $showPollCreate) { PollCreateSheet(conversationId: id) }
+        .sheet(isPresented: $showNoteCreate) { groupNoteCreateSheet }
         .sheet(item: $reminderSheet) { req in
             ReminderDetailSheet(request: req).cardNoticeOverlay()
         }
@@ -72,8 +83,13 @@ struct ChatInspector: View {
                     groupBoard(LoadedPolls(messages: loaded).polls)
                     remindersSection(reminders)
                     membersSection
+                    groupAdminSection
+                    privacySection
                 } else {
                     remindersSection(reminders)
+                    if id != engine.selfConversationId {
+                        privacySection
+                    }
                 }
                 mediaSection(preview(.images, loaded))
                 filesSection(preview(.files, loaded))
@@ -184,15 +200,29 @@ struct ChatInspector: View {
         section("Bảng tin nhóm") {
             list {
                 row(symbol: "plus.circle", title: "Tạo bình chọn") { showPollCreate = true }
+                Divider().padding(.leading, 40)
+                row(symbol: "note.text.badge.plus", title: "Tạo ghi chú") {
+                    newNoteTitle = ""
+                    showNoteCreate = true
+                }
+                ForEach(groupNotes.prefix(listLimit)) { note in
+                    Divider().padding(.leading, 40)
+                    row(
+                        symbol: note.isPinned ? "pin.fill" : "note.text",
+                        title: note.title,
+                        subtitle: note.isPinned ? "Đã ghim trên bảng tin" : "Ghi chú nhóm",
+                        lines: 2
+                    ) {}
+                }
                 ForEach(polls.prefix(listLimit)) { poll in
                     Divider().padding(.leading, 40)
                     row(symbol: "chart.bar.fill", title: poll.question.isEmpty ? "Bình chọn" : poll.question, lines: 2) {
                         pollSheet = PollEntry(pollId: poll.id, question: poll.question)
                     }
                 }
-                if polls.isEmpty {
+                if polls.isEmpty && groupNotes.isEmpty {
                     Divider().padding(.leading, 40)
-                    emptyLine("Chưa có bình chọn trong nội dung đã tải")
+                    emptyLine("Chưa có bình chọn hoặc ghi chú")
                 }
             }
         }
@@ -312,10 +342,12 @@ struct ChatInspector: View {
 
     @ViewBuilder
     private var membersSection: some View {
-        // The official suggestion list is the only member source; without it the section is left out.
-        if let members, !members.isEmpty {
-            let shown = Array(members.prefix(memberLimit))
-            section("Thành viên", trailing: conversation.members > 0 ? "\(conversation.members)" : nil) {
+        let resolvedMembers = mergedGroupMembers
+        if !resolvedMembers.isEmpty {
+            let shown = Array(resolvedMembers.prefix(memberLimit))
+            let canManage = groupAdmin?.canManage(userId: engine.profile?.userId) ?? false
+            let isOwner = groupAdmin?.role(for: engine.profile?.userId) == .owner
+            section("Thành viên", trailing: conversation.members > 0 ? "\(conversation.members)" : "\(resolvedMembers.count)") {
                 list {
                     ForEach(Array(shown.enumerated()), id: \.element.id) { index, member in
                         if index > 0 { Divider().padding(.leading, 46) }
@@ -323,7 +355,18 @@ struct ChatInspector: View {
                             HStack(spacing: 10) {
                                 RemoteAvatar(url: member.avatar, name: member.name, size: 26)
                                 Text(member.name).font(.system(size: 13)).lineLimit(1)
-                                Spacer(minLength: 0)
+                                Spacer(minLength: 4)
+                                if let roleLabel = member.role.label {
+                                    Text(roleLabel)
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(member.role == .owner ? Color.orange : Color.accentColor)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(
+                                            (member.role == .owner ? Color.orange : Color.accentColor).opacity(0.14),
+                                            in: Capsule()
+                                        )
+                                }
                             }
                             .padding(.horizontal, 12)
                             .frame(minHeight: 38)
@@ -331,17 +374,253 @@ struct ChatInspector: View {
                         }
                         .buttonStyle(.plain)
                         .help("Nhắn tin với \(member.name)")
+                        .contextMenu {
+                            Button("Nhắn tin riêng", systemImage: "bubble.left") {
+                                engine.openContactConversation(member.id)
+                            }
+                            if canManage, member.id != engine.profile?.userId, member.role != .owner {
+                                Divider()
+                                if isOwner {
+                                    let makeDeputy = member.role != .admin
+                                    Button(
+                                        makeDeputy ? "Bổ nhiệm Phó nhóm" : "Gỡ quyền Phó nhóm",
+                                        systemImage: makeDeputy ? "person.badge.shield.checkmark" : "person.badge.minus"
+                                    ) {
+                                        runGroupAdminAction {
+                                            let ok = await engine.setGroupDeputy(in: id, memberId: member.id, isAdmin: makeDeputy)
+                                            if ok { await loadAdminExtras() }
+                                            return ok ? (makeDeputy ? "Đã bổ nhiệm Phó nhóm" : "Đã gỡ quyền Phó nhóm") : "Không thể cập nhật quyền"
+                                        }
+                                    }
+                                }
+                                Button("Mời khỏi nhóm", systemImage: "person.fill.xmark", role: .destructive) {
+                                    runGroupAdminAction {
+                                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: false)
+                                        if ok { await loadAdminExtras(); await loadMembers() }
+                                        return ok ? "Đã mời thành viên khỏi nhóm" : "Không thể mời thành viên"
+                                    }
+                                }
+                                Button("Chặn khỏi nhóm", systemImage: "hand.raised.fill", role: .destructive) {
+                                    runGroupAdminAction {
+                                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: true)
+                                        if ok { await loadAdminExtras(); await loadMembers() }
+                                        return ok ? "Đã chặn thành viên khỏi nhóm" : "Không thể chặn thành viên"
+                                    }
+                                }
+                            }
+                        }
                     }
-                    if conversation.members > shown.count {
+                    if max(conversation.members, resolvedMembers.count) > shown.count {
                         Divider()
-                        emptyLine("và \(conversation.members - shown.count) thành viên khác")
+                        emptyLine("và \(max(conversation.members, resolvedMembers.count) - shown.count) thành viên khác")
                     }
                 }
             }
-        } else if members == nil {
+        } else if members == nil && groupAdmin == nil {
             section("Thành viên") {
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, minHeight: 40)
             }
+        }
+    }
+
+    private var mergedGroupMembers: [GroupMemberItem] {
+        if let adminMembers = groupAdmin?.members, !adminMembers.isEmpty {
+            return adminMembers
+        }
+        guard let members else { return [] }
+        return members.map { candidate in
+            let role = groupAdmin?.role(for: candidate.id) ?? .member
+            return GroupMemberItem(id: candidate.id, name: candidate.name, avatar: candidate.avatar, role: role)
+        }.sorted { lhs, rhs in
+            if lhs.role.sortPriority != rhs.role.sortPriority {
+                return lhs.role.sortPriority < rhs.role.sortPriority
+            }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    @ViewBuilder
+    private var groupAdminSection: some View {
+        let canManage = groupAdmin?.canManage(userId: engine.profile?.userId) ?? false
+        let link = groupAdmin?.inviteLink
+        section("Quản trị & Link nhóm") {
+            list {
+                row(
+                    symbol: "link",
+                    title: link != nil ? "Sao chép link tham gia" : "Lấy link tham gia nhóm",
+                    subtitle: link ?? "Nhấn để tải hoặc tạo liên kết nhóm"
+                ) {
+                    if let link {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(link, forType: .string)
+                        groupActionFeedback = "Đã sao chép link nhóm"
+                    } else {
+                        runGroupAdminAction {
+                            var fetched = await engine.fetchGroupInviteLink(for: id)
+                            if fetched == nil, canManage {
+                                fetched = await engine.toggleGroupInviteLink(for: id, enable: true)
+                            }
+                            if let fetched { groupAdmin?.inviteLink = fetched }
+                            return fetched != nil ? "Đã tải link nhóm" : "Chưa lấy được link nhóm"
+                        }
+                    }
+                }
+                if canManage {
+                    Divider().padding(.leading, 40)
+                    Toggle("Khóa gửi tin nhắn", isOn: Binding(
+                        get: { groupAdmin?.lockSendMsg ?? false },
+                        set: { value in updateGroupSetting(lockSendMsg: value) }
+                    ))
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 38)
+                    Divider().padding(.leading, 40)
+                    Toggle("Khóa đổi tên & ảnh nhóm", isOn: Binding(
+                        get: { groupAdmin?.lockUpdateInfo ?? false },
+                        set: { value in updateGroupSetting(lockUpdateInfo: value) }
+                    ))
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 38)
+                    Divider().padding(.leading, 40)
+                    Toggle("Duyệt thành viên mới", isOn: Binding(
+                        get: { groupAdmin?.joinAppr ?? false },
+                        set: { value in updateGroupSetting(joinAppr: value) }
+                    ))
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 38)
+                }
+                if let groupActionFeedback {
+                    Divider().padding(.leading, 12)
+                    emptyLine(groupActionFeedback)
+                }
+            }
+        }
+        .disabled(groupActionBusy)
+    }
+
+    private var privacySection: some View {
+        section("Quyền riêng tư") {
+            list {
+                HStack(spacing: 10) {
+                    Image(systemName: "timer").font(.system(size: 14)).foregroundStyle(.tint).frame(width: 18)
+                    Text("Tin nhắn tự xóa").font(.system(size: 13))
+                    Spacer(minLength: 4)
+                    Menu(ttlLabel(autoDeleteTTL)) {
+                        Button("Tắt") { setAutoDelete(0) }
+                        Button("1 ngày") { setAutoDelete(86_400) }
+                        Button("7 ngày") { setAutoDelete(604_800) }
+                        Button("30 ngày") { setAutoDelete(2_592_000) }
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .font(.system(size: 12.5, weight: .medium))
+                }
+                .padding(.horizontal, 12)
+                .frame(minHeight: 38)
+            }
+        }
+    }
+
+    private var groupNoteCreateSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Tạo ghi chú nhóm")
+                .font(.system(size: 15, weight: .semibold))
+            TextField("Nhập nội dung ghi chú…", text: $newNoteTitle, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...5)
+            HStack {
+                Spacer()
+                Button("Hủy") { showNoteCreate = false }
+                Button("Đăng ghi chú") {
+                    let content = newNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !content.isEmpty else { return }
+                    showNoteCreate = false
+                    runGroupAdminAction {
+                        let ok = await engine.createGroupNote(in: id, title: content, pin: true)
+                        if ok { await loadAdminExtras() }
+                        return ok ? "Đã đăng ghi chú lên bảng tin" : "Không thể tạo ghi chú"
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(newNoteTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 340)
+    }
+
+    private func ttlLabel(_ seconds: Int) -> String {
+        switch seconds {
+        case 86_400: "1 ngày"
+        case 604_800: "7 ngày"
+        case 2_592_000: "30 ngày"
+        default: seconds > 0 ? "\(seconds / 86_400) ngày" : "Tắt"
+        }
+    }
+
+    private func updateGroupSetting(lockSendMsg: Bool? = nil, lockUpdateInfo: Bool? = nil, joinAppr: Bool? = nil) {
+        let nextLockMsg = lockSendMsg ?? (groupAdmin?.lockSendMsg ?? false)
+        let nextLockInfo = lockUpdateInfo ?? (groupAdmin?.lockUpdateInfo ?? false)
+        let nextJoinAppr = joinAppr ?? (groupAdmin?.joinAppr ?? false)
+        groupAdmin?.lockSendMsg = nextLockMsg
+        groupAdmin?.lockUpdateInfo = nextLockInfo
+        groupAdmin?.joinAppr = nextJoinAppr
+        runGroupAdminAction {
+            let ok = await engine.updateGroupSettings(
+                in: id,
+                lockSendMsg: nextLockMsg,
+                lockUpdateInfo: nextLockInfo,
+                joinAppr: nextJoinAppr
+            )
+            if !ok { await loadAdminExtras() }
+            return ok ? "Đã cập nhật cài đặt nhóm" : "Không thể cập nhật cài đặt"
+        }
+    }
+
+    private func setAutoDelete(_ seconds: Int) {
+        let previous = autoDeleteTTL
+        autoDeleteTTL = seconds
+        let target = id
+        Task {
+            let ok = await engine.updateAutoDeleteTTL(for: target, ttlSeconds: seconds)
+            if !ok, id == target {
+                autoDeleteTTL = previous
+            }
+        }
+    }
+
+    private func runGroupAdminAction(_ work: @escaping @MainActor () async -> String) {
+        guard !groupActionBusy else { return }
+        groupActionBusy = true
+        Task {
+            defer { groupActionBusy = false }
+            groupActionFeedback = await work()
+        }
+    }
+
+    private func loadAdminExtras() async {
+        let target = id
+        groupActionFeedback = nil
+        if conversation.isGroup {
+            async let adminTask = engine.loadGroupAdminState(for: target)
+            async let notesTask = engine.loadGroupNotes(for: target)
+            let (admin, notes) = await (adminTask, notesTask)
+            guard !Task.isCancelled, id == target else { return }
+            groupAdmin = admin
+            groupNotes = notes
+            if let adminTTL = admin?.ttl {
+                autoDeleteTTL = adminTTL
+            } else {
+                autoDeleteTTL = await engine.loadAutoDeleteTTL(for: target)
+            }
+        } else {
+            groupAdmin = nil
+            groupNotes = []
+            let ttl = await engine.loadAutoDeleteTTL(for: target)
+            guard !Task.isCancelled, id == target else { return }
+            autoDeleteTTL = ttl
         }
     }
 

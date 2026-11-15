@@ -38,10 +38,31 @@ struct ChatComposer: View {
     /// Stickers suggested for the draft (official suggestion logic); they show only while the draft still is the text they were found for.
     @State private var typingStickers = TypingStickerState()
     @State private var sendingSuggestion: String?
+    @State private var quickMessages: [QuickMessageTemplate] = []
+    @State private var quickSelected = 0
+    @State private var quickDismissed = false
+    @State private var showQuickMessageSheet = false
+    @State private var newQuickShortcut = ""
+    @State private var newQuickTitle = ""
+    @State private var newQuickContent = ""
 
     private var suggestionsOpen: Bool { isGroup && query != nil && !candidates.isEmpty }
+    private var quickMessageMatches: [QuickMessageTemplate] {
+        guard !suggestionsOpen, !quickDismissed,
+              draft.hasPrefix("/"), !draft.contains("\n"), draft.count <= 40
+        else { return [] }
+        let needle = draft.lowercased()
+        if needle == "/" { return quickMessages }
+        let suffix = String(needle.dropFirst())
+        return quickMessages.filter {
+            $0.shortcut.lowercased().hasPrefix(needle) || $0.title.lowercased().contains(suffix)
+        }
+    }
+    private var quickMessagesOpen: Bool {
+        !suggestionsOpen && !quickDismissed && draft.hasPrefix("/") && !draft.contains("\n") && draft.count <= 40
+    }
     private var stickerStripOpen: Bool {
-        typingStickers.isVisible(draft: draft, mentionListOpen: suggestionsOpen, settingEnabled: StickerSuggestState.shared.setting?.enabled)
+        typingStickers.isVisible(draft: draft, mentionListOpen: suggestionsOpen || quickMessagesOpen, settingEnabled: StickerSuggestState.shared.setting?.enabled)
     }
 
     private var staged: [StagedImage] { engine.stagedImages[conversationId] ?? [] }
@@ -61,10 +82,19 @@ struct ChatComposer: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity)
             }
-            if uploadingCount > 0 {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini)
-                    Text("Đang gửi tệp đính kèm…")
+            if uploadingCount > 0 || engine.activeUploadProgress != nil {
+                HStack(spacing: 8) {
+                    if let progress = engine.activeUploadProgress {
+                        ProgressView(value: progress.fractionCompleted)
+                            .progressViewStyle(.linear)
+                            .frame(width: 90)
+                        Text(progress.totalChunks > 1
+                             ? "Đang tải lên \(Int(progress.fractionCompleted * 100))% (\(progress.completedChunks)/\(progress.totalChunks))"
+                             : "Đang tải lên \(Int(progress.fractionCompleted * 100))%")
+                    } else {
+                        ProgressView().controlSize(.mini)
+                        Text("Đang gửi tệp đính kèm…")
+                    }
                 }
                 .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -103,6 +133,20 @@ struct ChatComposer: View {
                 MentionSuggestions(candidates: candidates, selected: $selected, pick: pick)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if quickMessagesOpen {
+                QuickMessageSuggestions(
+                    templates: quickMessageMatches,
+                    selected: $quickSelected,
+                    pick: pickQuickMessage,
+                    openManager: {
+                        newQuickShortcut = draft.count > 1 ? draft : "/"
+                        newQuickTitle = ""
+                        newQuickContent = ""
+                        showQuickMessageSheet = true
+                    }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if stickerStripOpen {
                 TypingStickerStrip(stickers: typingStickers.stickers, sending: sendingSuggestion, pick: sendSuggestion,
                                    dismiss: { typingStickers.dismissed = true })
@@ -124,16 +168,20 @@ struct ChatComposer: View {
         .padding(.top, 8)
         .padding(.bottom, 12)
         .animation(.snappy(duration: 0.18), value: suggestionsOpen)
+        .animation(.snappy(duration: 0.18), value: quickMessagesOpen)
         .animation(.snappy(duration: 0.18), value: stickerStripOpen)
         .animation(.snappy(duration: 0.18), value: replyTo?.id)
         .animation(.snappy(duration: 0.18), value: staged.map(\.id))
         .animation(.snappy(duration: 0.18), value: typingName)
-        .animation(.snappy(duration: 0.18), value: uploadingCount > 0)
+        .animation(.snappy(duration: 0.18), value: uploadingCount > 0 || engine.activeUploadProgress != nil)
         .onChange(of: staged.count) { old, now in if now > old { handle.focus() } }
         .onAppear {
             ComposerTextView.accent = NSColor(ChatPalette.accent(accentStored))
             handle.conversationId = conversationId
             installPasteKeyMonitor()
+        }
+        .task {
+            quickMessages = await engine.loadQuickMessages()
         }
         .onChange(of: conversationId) { _, now in
             handle.conversationId = now
@@ -144,9 +192,14 @@ struct ChatComposer: View {
         .onChange(of: accentStored) { _, now in ComposerTextView.accent = NSColor(ChatPalette.accent(now)) }
         .task(id: query) { await loadCandidates() }
         .task(id: draft) { await loadStickerSuggestions() }
-        .onChange(of: draft) { _, _ in typingStickers.dismissed = false }
+        .onChange(of: draft) { _, _ in
+            typingStickers.dismissed = false
+            quickDismissed = false
+            quickSelected = 0
+        }
         .sheet(isPresented: $showPollCreate) { PollCreateSheet(conversationId: conversationId) }
         .sheet(isPresented: $showMyCard) { MyCardSheet(conversationId: conversationId, conversationName: name) }
+        .sheet(isPresented: $showQuickMessageSheet) { quickMessageManagerSheet }
         .sheet(isPresented: Binding(get: { reminderInfo != nil }, set: { if !$0 { reminderInfo = nil } })) {
             if let reminderInfo { ReminderComposeSheet(conversationId: conversationId, info: reminderInfo) }
         }
@@ -518,7 +571,26 @@ struct ChatComposer: View {
     /// Keys the text view forwards while the popover is open; returns whether it consumed the key.
     private func suggestionKey(_ key: MentionKey) -> Bool {
         // Esc hides the sticker suggestions (they take no other keys: Return keeps sending the text).
-        if !suggestionsOpen, stickerStripOpen, key == .cancel { typingStickers.dismissed = true; return true }
+        if !suggestionsOpen, !quickMessagesOpen, stickerStripOpen, key == .cancel { typingStickers.dismissed = true; return true }
+        if quickMessagesOpen {
+            let matches = quickMessageMatches
+            switch key {
+            case .cancel:
+                quickDismissed = true
+                return true
+            case .down where !matches.isEmpty:
+                quickSelected = (quickSelected + 1) % matches.count
+                return true
+            case .up where !matches.isEmpty:
+                quickSelected = (quickSelected - 1 + matches.count) % matches.count
+                return true
+            case .confirm where !matches.isEmpty:
+                pickQuickMessage(matches[min(quickSelected, matches.count - 1)])
+                return true
+            default:
+                return false
+            }
+        }
         guard suggestionsOpen else { return false }
         switch key {
         case .down: selected = (selected + 1) % candidates.count
@@ -527,6 +599,162 @@ struct ChatComposer: View {
         case .cancel: query = nil; candidates = []
         }
         return true
+    }
+
+    private func pickQuickMessage(_ item: QuickMessageTemplate) {
+        quickDismissed = true
+        mentions = []
+        draft = item.content
+        handle.focus()
+    }
+
+    private var quickMessageManagerSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Tin nhắn nhanh (/shortcut)")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button("Đóng") { showQuickMessageSheet = false }
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("/phimtat", text: $newQuickShortcut)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 110)
+                    TextField("Tiêu đề ngắn", text: $newQuickTitle)
+                        .textFieldStyle(.roundedBorder)
+                }
+                TextField("Nội dung tin nhắn mẫu…", text: $newQuickContent, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(2...4)
+                HStack {
+                    Spacer()
+                    Button("Lưu mẫu") {
+                        let sc = newQuickShortcut.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let body = newQuickContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !sc.isEmpty, !body.isEmpty else { return }
+                        let title = newQuickTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                        Task {
+                            quickMessages = await engine.saveQuickMessage(
+                                shortcut: sc,
+                                title: title.isEmpty ? sc : title,
+                                content: body
+                            )
+                            newQuickShortcut = "/"
+                            newQuickTitle = ""
+                            newQuickContent = ""
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        newQuickShortcut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || newQuickContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                }
+            }
+            Divider()
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(quickMessages) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(item.shortcut)
+                                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.tint)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title).font(.system(size: 12.5, weight: .medium))
+                                Text(item.content).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                Task { quickMessages = await engine.deleteQuickMessage(id: item.id) }
+                            } label: {
+                                Image(systemName: "trash").font(.system(size: 12))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+            .frame(maxHeight: 200)
+        }
+        .padding(18)
+        .frame(width: 420)
+    }
+}
+
+private struct QuickMessageSuggestions: View {
+    let templates: [QuickMessageTemplate]
+    @Binding var selected: Int
+    let pick: (QuickMessageTemplate) -> Void
+    let openManager: () -> Void
+
+    private let rowHeight: CGFloat = 40
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !templates.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(Array(templates.enumerated()), id: \.element.id) { index, item in
+                                Button { pick(item) } label: {
+                                    HStack(spacing: 10) {
+                                        Text(item.shortcut)
+                                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                            .foregroundStyle(.tint)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 3)
+                                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(item.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                                            Text(item.content).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .frame(height: rowHeight)
+                                    .contentShape(Rectangle())
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(index == selected ? AnyShapeStyle(TintShapeStyle().opacity(0.16)) : AnyShapeStyle(Color.clear))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .id(item.id)
+                                .onHover { inside in if inside { selected = index } }
+                            }
+                        }
+                        .padding(6)
+                    }
+                    .scrollIndicators(.hidden)
+                    .onChange(of: selected) { _, now in
+                        guard templates.indices.contains(now) else { return }
+                        withAnimation(.snappy(duration: 0.12)) { proxy.scrollTo(templates[now].id) }
+                    }
+                }
+                .frame(height: min(CGFloat(templates.count) * (rowHeight + 2) + 12, 5 * (rowHeight + 2)))
+                Divider()
+            }
+            Button(action: openManager) {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle")
+                    Text(templates.isEmpty ? "Chưa có mẫu khớp • Tạo tin nhắn nhanh" : "Quản lý / Tạo mẫu tin nhắn nhanh")
+                    Spacer()
+                }
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.tint)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Gợi ý tin nhắn nhanh")
     }
 }
 

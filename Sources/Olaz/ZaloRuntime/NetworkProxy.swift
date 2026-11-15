@@ -41,7 +41,15 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
     var responseObserver: ((URL, Int, Data) -> Void)?
     /// Realtime-channel diagnostics: lifecycle + frame headers only (never payloads).
     var socketTrace: ((String) -> Void)?
+    /// Passive WebSocket decoder events (typing, file_done, incoming messages, receipts).
+    var onWebSocketEvent: ((WebSocketDecodedEvent) -> Void)?
+    /// Chunked upload progress observed on `photo_original/upload` / `asyncfile/upload` and `file_done`.
+    var onUploadProgress: ((_ conversationId: String?, _ completedChunks: Int, _ totalChunks: Int, _ finished: Bool) -> Void)?
+    private let wsDecoder = WebSocketEventDecoder()
     private var frameCounts: [Int: Int] = [:]
+    private var activeUploadInFlight = 0
+    private var activeUploadCompleted = 0
+    private var activeUploadPeak = 0
 
     /// Zalo realtime frames start with `[version u8][cmd u16 LE][subCmd u8]`.
     private func describeFrame(_ data: Data) -> String {
@@ -152,6 +160,9 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
             Self.apply(encoded, to: &request)
         }
         Self.applyClientHeaders(to: &request)
+
+        let uploadTracker = beginUploadTrackingIfNeeded(url: url, encodedBody: body["body"] as? [String: Any])
+        defer { finishUploadTracking(uploadTracker) }
 
         // The fingerprint helper first: Chromium 108's TLS + HTTP/2 instead of Apple's.
         // Only helper-unavailability falls through to URLSession; an upstream failure is a
@@ -523,6 +534,7 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
             emit(id, "text", ["text": text])
         case .binary(let data):
             traceFrame(id, "in ", data)
+            decodeAndForwardSocketFrame(data)
             emit(id, "binary", ["data": data.base64EncodedString()])
         case .closed(let code, let reason):
             sockets.removeValue(forKey: id)
@@ -564,6 +576,7 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
                     self.receive(id, task)
                 case .success(.data(let data)):
                     self.traceFrame(id, "in ", data)
+                    self.decodeAndForwardSocketFrame(data)
                     self.emit(id, "binary", ["data": data.base64EncodedString()])
                     self.receive(id, task)
                 case .success:
@@ -667,6 +680,87 @@ final class NetworkProxy: NSObject, WKScriptMessageHandlerWithReply {
             arguments: ["id": id, "type": type, "payload": payload],
             in: frame, in: .page, completionHandler: nil
         )
+    }
+
+    // MARK: - Passive WebSocket Decode & Upload Chunk Tracking
+
+    private func decodeAndForwardSocketFrame(_ data: Data) {
+        let events = wsDecoder.decode(frame: data)
+        guard !events.isEmpty else { return }
+        for event in events {
+            if case .uploadFileDone = event {
+                let total = max(1, activeUploadPeak)
+                onUploadProgress?(nil, total, total, true)
+                activeUploadPeak = 0
+                activeUploadCompleted = 0
+            }
+            onWebSocketEvent?(event)
+        }
+    }
+
+    private struct UploadTracker {
+        let isUpload: Bool
+        let chunkId: Int?
+        let totalChunks: Int?
+    }
+
+    private func beginUploadTrackingIfNeeded(url: URL, encodedBody: [String: Any]?) -> UploadTracker {
+        let path = url.path().lowercased()
+        let parts = encodedBody?["parts"] as? [[String: Any]] ?? []
+        let hasChunkPart = parts.contains { part in
+            let name = (part["name"] as? String ?? "").lowercased()
+            return name == "chunkcontent" || name == "filecontent"
+        }
+        let isUploadEndpoint = path.contains("photo_original/upload")
+            || path.contains("asyncfile/upload")
+            || path.hasSuffix("/upload")
+            || hasChunkPart
+
+        guard isUploadEndpoint else {
+            return UploadTracker(isUpload: false, chunkId: nil, totalChunks: nil)
+        }
+
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func intValue(_ key: String) -> Int? {
+            if let item = queryItems.first(where: { $0.name.caseInsensitiveCompare(key) == .orderedSame })?.value,
+               let val = Int(item), val > 0 {
+                return val
+            }
+            if let part = parts.first(where: { ($0["name"] as? String)?.caseInsensitiveCompare(key) == .orderedSame })?["value"] as? String,
+               let val = Int(part), val > 0 {
+                return val
+            }
+            return nil
+        }
+
+        let chunkId = intValue("chunkId")
+        let totalChunks = intValue("totalChunk")
+
+        activeUploadInFlight += 1
+        let estimatedTotal = max(totalChunks ?? 1, activeUploadCompleted + activeUploadInFlight)
+        activeUploadPeak = max(activeUploadPeak, estimatedTotal)
+
+        let reportedCompleted = max(0, (chunkId.map { $0 - 1 }) ?? activeUploadCompleted)
+        onUploadProgress?(nil, reportedCompleted, activeUploadPeak, false)
+
+        return UploadTracker(isUpload: true, chunkId: chunkId, totalChunks: totalChunks)
+    }
+
+    private func finishUploadTracking(_ tracker: UploadTracker) {
+        guard tracker.isUpload else { return }
+        activeUploadInFlight = max(0, activeUploadInFlight - 1)
+        activeUploadCompleted += 1
+
+        let total = max(tracker.totalChunks ?? 1, activeUploadPeak, activeUploadCompleted)
+        let completed = min(total, tracker.chunkId ?? activeUploadCompleted)
+        let finished = activeUploadInFlight == 0 && (tracker.totalChunks == nil || completed >= total)
+
+        onUploadProgress?(nil, completed, total, finished)
+
+        if activeUploadInFlight == 0 && finished {
+            activeUploadCompleted = 0
+            activeUploadPeak = 0
+        }
     }
 }
 

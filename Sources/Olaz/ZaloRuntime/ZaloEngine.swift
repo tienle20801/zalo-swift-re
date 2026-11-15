@@ -99,6 +99,21 @@ final class ZaloEngine {
     internal(set) var historyTicks: [String: Int] = [:]
     /// Who is typing per conversation (display name), cleared after a few seconds.
     internal(set) var typing: [String: String] = [:]
+    /// Active chunked upload progress observed on `NetworkProxy` + `file_done` WebSocket frames.
+    struct UploadProgressState: Equatable, Sendable {
+        var completedChunks: Int
+        var totalChunks: Int
+        var isFinishing: Bool
+
+        var fractionCompleted: Double {
+            if isFinishing { return 1.0 }
+            guard totalChunks > 0 else { return 0 }
+            return min(1.0, max(0.0, Double(completedChunks) / Double(totalChunks)))
+        }
+    }
+    var activeUploadProgress: UploadProgressState?
+    @ObservationIgnored private var uploadClearTask: Task<Void, Never>?
+    @ObservationIgnored private var passiveTypingClearTasks: [String: Task<Void, Never>] = [:]
     /// Phone → PC message transfer, nil when none is in progress / offered.
     internal(set) var transfer: MessageTransferState?
     /// Whether a manual phone → PC sync can start now (official `canSync` guards).
@@ -288,6 +303,12 @@ final class ZaloEngine {
         host.network.socketTrace = { log.write($0) }
         host.network.responseObserver = { [weak self] url, status, body in
             self?.observe(url: url, status: status, body: body)
+        }
+        host.network.onWebSocketEvent = { [weak self] event in
+            self?.handleWebSocketEvent(event)
+        }
+        host.network.onUploadProgress = { [weak self] _, completed, total, finished in
+            self?.handleUploadProgress(completed: completed, total: total, finished: finished)
         }
 
         self.platform = platform
@@ -575,6 +596,65 @@ final class ZaloEngine {
     /// `qr-id` poll result meaning "scanned once; show the second (device-linking) QR" — see `Dr`/`genSecondQR` in the
     /// official `login-startup` chunk.
     static let secondQRRequiredCode = -20
+
+    // MARK: Passive WebSocket & Upload Progress
+
+    internal func handleWebSocketEvent(_ event: WebSocketDecodedEvent) {
+        switch event {
+        case .cipherKeyUpdated:
+            break
+        case .typing(let conversationId, let senderId, let isGroup):
+            if typing[conversationId] == nil {
+                let resolvedName = resolvePassiveSenderName(senderId: senderId, conversationId: conversationId, isGroup: isGroup)
+                typing[conversationId] = resolvedName
+            }
+            passiveTypingClearTasks[conversationId]?.cancel()
+            passiveTypingClearTasks[conversationId] = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+                self?.typing.removeValue(forKey: conversationId)
+                self?.passiveTypingClearTasks.removeValue(forKey: conversationId)
+            }
+        case .uploadFileDone:
+            handleUploadProgress(completed: 1, total: 1, finished: true)
+        case .incomingMessage(let conversationId, _, _, _, _, _):
+            passiveTypingClearTasks[conversationId]?.cancel()
+            passiveTypingClearTasks.removeValue(forKey: conversationId)
+            typing.removeValue(forKey: conversationId)
+        case .seenOrDelivered, .messageUndo:
+            break
+        }
+    }
+
+    internal func handleUploadProgress(completed: Int, total: Int, finished: Bool) {
+        uploadClearTask?.cancel()
+        uploadClearTask = nil
+        let safeTotal = max(1, total)
+        let safeCompleted = min(safeTotal, max(0, completed))
+        activeUploadProgress = UploadProgressState(
+            completedChunks: finished ? safeTotal : safeCompleted,
+            totalChunks: safeTotal,
+            isFinishing: finished
+        )
+        if finished {
+            uploadClearTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(400))
+                guard !Task.isCancelled else { return }
+                self?.activeUploadProgress = nil
+                self?.uploadClearTask = nil
+            }
+        }
+    }
+
+    private func resolvePassiveSenderName(senderId: String, conversationId: String, isGroup: Bool) -> String {
+        if let friend = contacts.friends.first(where: { $0.id == senderId }), !friend.name.isEmpty {
+            return friend.name
+        }
+        if !isGroup, let summary = conversationsById[conversationId], !summary.displayName.isEmpty {
+            return summary.displayName
+        }
+        return isGroup ? "Thành viên" : "Người dùng"
+    }
 
     /// The server sets `qr_timeout`; mirror the official page's expiry UI as a fallback if DOM `invalid` has not fired yet (~150 s).
     private func scheduleExpiry() {
