@@ -60,6 +60,8 @@
           if (!real(o) || (typeof o !== 'object' && typeof o !== 'function')) continue;
           if (!S.fetcher && typeof o === 'object' && has(o, 'createGroupV2', 'getGroupInfoByLink')) S.fetcher = o;
           if (!S.api && has(o, 'updateAutoDeleteChat')) S.api = o;
+          if (!S.info && has(o, 'getFullInfoGroupById')) S.info = o;
+          if (!S.admin && has(o, 'addAdmin', 'removeAdmin') && (has(o, 'changeSettingGroup') || has(o, 'removeMember'))) S.admin = o;
           if (!S.friends && has(o, 'getProfileFriendByIdSync')) S.friends = o;
         }
       } catch {}
@@ -127,15 +129,19 @@
 
     let info = findGroupInStore(gId);
     try {
-      const fetched = await callAny([S.groups, S.fetcher], ['getFullInfoGroupById', 'getGroupInfo', 'getGroupDetail'], rawId)
-        || await callAny([S.groups, S.fetcher], ['getFullInfoGroupById', 'getGroupInfo', 'getGroupDetail'], gId);
+      const targets = [S.info, S.groups, S.admin, S.fetcher];
+      const fetched = await callAny(targets, ['getFullInfoGroupById'], gId)
+        || await callAny(targets, ['getFullInfoGroupById'], rawId)
+        || await callAny(targets, ['getGroupById'], gId);
       if (fetched && typeof fetched === 'object') {
         const inner = fetched.gridInfoMap ? (fetched.gridInfoMap[rawId] || fetched.gridInfoMap[gId]) : (fetched.data || fetched);
         if (inner && typeof inner === 'object') info = Object.assign({}, info, inner);
       }
     } catch {}
 
-    const creatorId = str(info.creatorId || info.ownerId || info.creator || '');
+    const syncRec = safe(() => S.groups && S.groups.getGroupByIdSync(gId), null) || {};
+    if (!info.creatorId && syncRec.creatorId) info = Object.assign({}, syncRec, info);
+    const creatorId = str(info.creatorId || syncRec.creatorId || info.ownerId || info.creator || '');
     const adminIdsRaw = Array.isArray(info.adminIds) ? info.adminIds : (Array.isArray(info.admins) ? info.admins : []);
     const adminIds = Array.from(new Set(adminIdsRaw.map(str).filter(Boolean)));
     const adminSet = new Set(adminIds);
@@ -149,7 +155,8 @@
 
     const rawMembers = Array.isArray(info.currentMems) ? info.currentMems
       : (Array.isArray(info.members) ? info.members
-      : (Array.isArray(info.memVerList) ? info.memVerList : []));
+      : (Array.isArray(info.memVerList) ? info.memVerList
+      : (Array.isArray(info.topMember) ? info.topMember : [])));
 
     const seen = new Set();
     const members = [];
@@ -182,12 +189,12 @@
     const rawId = stripG(groupId);
     const uid = str(memberId);
     const methods = isAdmin
-      ? ['addAdmin', 'addGroupDeputy', 'grantAdmin']
-      : ['removeAdmin', 'removeGroupDeputy', 'revokeAdmin'];
+      ? ['addAdmin', 'addGroupAdmin']
+      : ['removeAdmin', 'removeGroupAdmin'];
     try {
-      const res = await callAny([S.groups, S.fetcher], methods, rawId, [uid]);
+      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], methods, rawId, [uid]);
       if (res !== null) return { ok: true };
-      const resSingle = await callAny([S.groups, S.fetcher], methods, rawId, uid);
+      const resSingle = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], methods, rawId, uid);
       return { ok: resSingle !== null };
     } catch (e) {
       return { ok: false, error: String(e) };
@@ -200,11 +207,11 @@
     const uid = str(memberId);
     try {
       if (block) {
-        await callAny([S.groups, S.fetcher], ['addGroupBlockedMember', 'blockMember', 'blockUserFromGroup'], rawId, [uid]);
+        await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['addGroupBlockedMember', 'blockMember', 'blockUserFromGroup'], rawId, [uid]);
       }
-      const res = await callAny([S.groups, S.fetcher], ['kickMember', 'removeUserFromGroup', 'removeMemberFromGroup', 'kickMembers'], rawId, [uid]);
+      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['removeMemberFromGroup', 'removeMember'], rawId, [uid]);
       if (res !== null) return { ok: true };
-      const resSingle = await callAny([S.groups, S.fetcher], ['kickMember', 'removeUserFromGroup', 'removeMemberFromGroup'], rawId, uid);
+      const resSingle = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['removeMemberFromGroup', 'removeMember'], rawId, uid);
       return { ok: resSingle !== null };
     } catch (e) {
       return { ok: false, error: String(e) };
@@ -222,7 +229,7 @@
       blockName: settings && settings.lockUpdateInfo ? 1 : 0,
     };
     try {
-      const res = await callAny([S.groups, S.fetcher], ['updateGroupSetting', 'updateGroupSettings', 'changeGroupSetting'], rawId, payload);
+      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['changeSettingGroup', 'updateGroupSetting'], rawId, payload);
       return { ok: res !== null };
     } catch (e) {
       return { ok: false, error: String(e) };
@@ -235,13 +242,13 @@
     try {
       let res = null;
       if (action === 'enable') {
-        res = await callAny([S.groups, S.fetcher], ['enableGroupLink', 'createGroupLink'], rawId);
+        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['enableGroupLink', 'createGroupLink'], rawId);
       } else if (action === 'disable') {
-        res = await callAny([S.groups, S.fetcher], ['disableGroupLink'], rawId);
+        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['disableGroupLink'], rawId);
       } else {
-        res = await callAny([S.groups, S.fetcher], ['getGroupLink', 'getGroupLinkDetail'], rawId);
+        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['getGroupLinkDetail'], rawId);
       }
-      const link = str((res && (res.link || (res.data && res.data.link))) || '');
+      const link = str((res && (res.link || (res.data && res.data.link))) || '').replace(/^zalo:\/\//, 'https://');
       return { ok: res !== null, link };
     } catch (e) {
       return { ok: false, link: '', error: String(e) };
@@ -256,7 +263,7 @@
 
     let items = [];
     try {
-      const res = await callAny([S.groups, S.fetcher], ['getGroupBoardList', 'getListBoard', 'getGroupTopics', 'getNotes'], rawId);
+      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['getGroupBoardList', 'getListBoard', 'getGroupTopics', 'getNotes'], rawId);
       if (Array.isArray(res)) items = res;
       else if (res && Array.isArray(res.items)) items = res.items;
       else if (res && res.data && Array.isArray(res.data.items)) items = res.data.items;
