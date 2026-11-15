@@ -61,8 +61,10 @@
           if (!S.fetcher && typeof o === 'object' && has(o, 'createGroupV2', 'getGroupInfoByLink')) S.fetcher = o;
           if (!S.api && has(o, 'updateAutoDeleteChat')) S.api = o;
           if (!S.info && has(o, 'getFullInfoGroupById')) S.info = o;
+          if (!S.rawApi && has(o, 'removeMember', 'addGroupAdmin', 'removeGroupAdmin', 'updateGroupSetting')) S.rawApi = o;
           if (!S.admin && has(o, 'addAdmin', 'removeAdmin') && (has(o, 'changeSettingGroup') || has(o, 'removeMember'))) S.admin = o;
-          if (!S.friends && has(o, 'getProfileFriendByIdSync')) S.friends = o;
+          if (!S.friends && (has(o, 'getProfileFriendByIdSync') || has(o, 'getMiniInfo', 'getProfileFriendByIds'))) S.friends = o;
+          if (!S.consts && ex.MEMBERS_TRACKING_SOURCE && ex.GROUPID_PREFIX !== undefined) S.consts = ex;
         }
       } catch {}
     });
@@ -110,15 +112,25 @@
     return candidates.find((x) => x && typeof x === 'object') || {};
   };
 
+  const cleanUid = (raw) => {
+    const s = str(raw).trim();
+    if (!s) return '';
+    return s.includes('_') ? s.split('_')[0] : s;
+  };
+
   const profileForMember = (uid, rawMember) => {
-    const id = str(uid);
+    const id = cleanUid(uid);
     const st = storeState();
+    const me = st.user && str(st.user.userId) === id ? st.user : null;
     const fromFriends = safe(() => S.friends && S.friends.getProfileFriendByIdSync(id), null);
+    const mini = safe(() => S.friends && S.friends.getMiniInfo && S.friends.getMiniInfo(id), null);
+    const dName = safe(() => S.friends && S.friends.getDName && S.friends.getDName(id), '');
+    const dAvt = safe(() => S.friends && S.friends.getAvatar && S.friends.getAvatar(id), '');
     const fromStore = safe(() => (st.users && st.users[id]) || (st.profiles && st.profiles[id]), null);
     const m = rawMember && typeof rawMember === 'object' ? rawMember : {};
-    const p = fromFriends || fromStore || {};
-    const name = str(m.dName || m.zaloName || m.displayName || p.displayName || p.zaloName || p.dName) || id;
-    const avatar = str(m.avatar || p.avatar || '');
+    const p = fromFriends || mini || fromStore || me || {};
+    const name = str(m.dName || m.zaloName || m.displayName || dName || p.displayName || p.zaloName || p.dName || p.name) || id;
+    const avatar = str(m.avatar || m.avt || dAvt || p.avatar || p.avt || '');
     return { id, name, avatar };
   };
 
@@ -153,23 +165,58 @@
     const inviteLink = str(info.link || info.inviteLink || info.joinLink || '');
     const ttl = Number(info.ttl || info.autoDelete || info.msgTTL || 0) || 0;
 
-    const rawMembers = Array.isArray(info.currentMems) ? info.currentMems
-      : (Array.isArray(info.members) ? info.members
-      : (Array.isArray(info.memVerList) ? info.memVerList
-      : (Array.isArray(info.topMember) ? info.topMember : [])));
+    // Collect every member record & uid across `currentMems`, `members`, `topMember`, `memberIds`, `memVerList`, and `memberVerMap`.
+    const rawByUid = new Map();
+    const addRaw = (item) => {
+      if (typeof item === 'string' || typeof item === 'number') {
+        const uid = cleanUid(item);
+        if (uid && !rawByUid.has(uid)) rawByUid.set(uid, item);
+      } else if (item && typeof item === 'object') {
+        const uid = cleanUid(item.id || item.uid || item.userId);
+        if (uid) rawByUid.set(uid, Object.assign({}, rawByUid.get(uid) || {}, item));
+      }
+    };
 
-    const seen = new Set();
-    const members = [];
-    for (const item of rawMembers) {
-      const uid = typeof item === 'string' || typeof item === 'number'
-        ? str(item)
-        : str(item && (item.id || item.uid || item.userId));
-      if (!uid || seen.has(uid)) continue;
-      seen.add(uid);
-      const prof = profileForMember(uid, item);
-      const role = uid === creatorId ? 'owner' : (adminSet.has(uid) ? 'admin' : 'member');
-      members.push({ ...prof, role });
+    for (const list of [info.currentMems, info.members, info.topMember, syncRec.topMember, info.memberIds, info.memVerList]) {
+      if (Array.isArray(list)) list.forEach(addRaw);
     }
+    if (info.memberVerMap && typeof info.memberVerMap === 'object') {
+      Object.keys(info.memberVerMap).forEach(addRaw);
+    }
+    if (creatorId) addRaw(creatorId);
+    adminIds.forEach(addRaw);
+
+    const allUids = Array.from(rawByUid.keys());
+    const missingNames = allUids.filter((uid) => {
+      const prof = profileForMember(uid, rawByUid.get(uid));
+      return !prof.name || prof.name === uid;
+    });
+    if (missingNames.length && S.friends && typeof S.friends.getProfileFriendByIds === 'function') {
+      for (let i = 0; i < Math.min(missingNames.length, 200); i += 50) {
+        const chunk = missingNames.slice(i, i + 50);
+        try {
+          const batch = await Promise.race([
+            Promise.resolve(S.friends.getProfileFriendByIds(chunk, 1)),
+            new Promise((r) => setTimeout(() => r(null), 2500)),
+          ]);
+          if (batch && typeof batch === 'object') {
+            const map = batch.changed_profiles || batch.unchanged_profiles || batch;
+            if (Array.isArray(map)) map.forEach(addRaw);
+            else if (typeof map === 'object') {
+              for (const k of Object.keys(map)) {
+                if (map[k] && typeof map[k] === 'object') addRaw(Object.assign({ id: k }, map[k]));
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+
+    const members = allUids.map((uid) => {
+      const prof = profileForMember(uid, rawByUid.get(uid));
+      const role = uid === creatorId ? 'owner' : (adminSet.has(uid) ? 'admin' : 'member');
+      return { ...prof, role };
+    });
 
     return {
       groupId: gId,
@@ -184,19 +231,24 @@
     };
   };
 
+  const isApiOk = (res) => res !== null && res !== undefined
+    && !(typeof res === 'object' && typeof res.error_code === 'number' && res.error_code !== 0);
+
   const setDeputy = async (groupId, memberId, isAdmin) => {
     await ensureReady();
     const rawId = stripG(groupId);
     const uid = str(memberId);
     const methods = isAdmin
-      ? ['addAdmin', 'addGroupAdmin']
-      : ['removeAdmin', 'removeGroupAdmin'];
+      ? ['addGroupAdmin', 'addAdmin']
+      : ['removeGroupAdmin', 'removeAdmin'];
     try {
-      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], methods, rawId, [uid]);
-      if (res !== null) return { ok: true };
-      const resSingle = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], methods, rawId, uid);
-      return { ok: resSingle !== null };
+      const targets = [S.rawApi, S.admin, S.groups, S.fetcher, S.info, S.api];
+      const res = await callAny(targets, methods, rawId, [uid]);
+      if (res !== null) return { ok: isApiOk(res) };
+      const resSingle = await callAny(targets, methods, rawId, uid);
+      return { ok: isApiOk(resSingle) };
     } catch (e) {
+      diag(`setDeputy failed: ${String(e)}`);
       return { ok: false, error: String(e) };
     }
   };
@@ -204,16 +256,22 @@
   const removeMember = async (groupId, memberId, block) => {
     await ensureReady();
     const rawId = stripG(groupId);
+    const gId = withG(groupId);
     const uid = str(memberId);
+    const targets = [S.rawApi, S.admin, S.groups, S.info, S.api];
     try {
       if (block) {
-        await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['addGroupBlockedMember', 'blockMember', 'blockUserFromGroup'], rawId, [uid]);
+        await callAny(targets, ['blockMember', 'addGroupBlockedMember', 'blockUserFromGroup'], rawId, [uid]);
       }
-      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['removeMemberFromGroup', 'removeMember'], rawId, [uid]);
-      if (res !== null) return { ok: true };
-      const resSingle = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['removeMemberFromGroup', 'removeMember'], rawId, uid);
-      return { ok: resSingle !== null };
+      let res = await callAny(targets, ['removeMember', 'removeMembersGroup', 'removeMemberInGroup'], rawId, [uid]);
+      if (res === null && S.fetcher) {
+        res = await callAny([S.fetcher], ['removeMemberFromGroup'], gId, [{ id: uid }]);
+      }
+      if (res !== null) return { ok: isApiOk(res) };
+      const resSingle = await callAny(targets, ['removeMember'], rawId, uid);
+      return { ok: isApiOk(resSingle) };
     } catch (e) {
+      diag(`removeMember failed: ${String(e)}`);
       return { ok: false, error: String(e) };
     }
   };
@@ -224,14 +282,14 @@
     const payload = {
       lockSendMsg: settings && settings.lockSendMsg ? 1 : 0,
       lockCreatePost: settings && settings.lockUpdateInfo ? 1 : 0,
-      lockUpdateInfo: settings && settings.lockUpdateInfo ? 1 : 0,
       joinAppr: settings && settings.joinAppr ? 1 : 0,
       blockName: settings && settings.lockUpdateInfo ? 1 : 0,
     };
     try {
-      const res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['changeSettingGroup', 'updateGroupSetting'], rawId, payload);
-      return { ok: res !== null };
+      const res = await callAny([S.rawApi, S.admin, S.groups, S.fetcher, S.info, S.api], ['updateGroupSetting', 'changeSettingGroup'], rawId, payload);
+      return { ok: isApiOk(res) };
     } catch (e) {
+      diag(`updateSettings failed: ${String(e)}`);
       return { ok: false, error: String(e) };
     }
   };
@@ -239,19 +297,66 @@
   const getOrToggleGroupLink = async (groupId, action) => {
     await ensureReady();
     const rawId = stripG(groupId);
+    const targets = [S.rawApi, S.admin, S.groups, S.fetcher, S.info, S.api];
     try {
       let res = null;
       if (action === 'enable') {
-        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['enableGroupLink', 'createGroupLink'], rawId);
+        res = await callAny(targets, ['renewGroupLink', 'enableGroupLink', 'createGroupLink'], rawId);
       } else if (action === 'disable') {
-        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['disableGroupLink'], rawId);
+        res = await callAny(targets, ['disableGroupLink'], rawId);
       } else {
-        res = await callAny([S.admin, S.groups, S.fetcher, S.info, S.api], ['getGroupLinkDetail'], rawId);
+        res = await callAny(targets, ['getGroupLinkDetail'], rawId);
       }
-      const link = str((res && (res.link || (res.data && res.data.link))) || '').replace(/^zalo:\/\//, 'https://');
-      return { ok: res !== null, link };
+      const dataObj = (res && res.data && typeof res.data === 'object') ? res.data : res;
+      const link = str((dataObj && dataObj.link) || '').replace(/^zalo:\/\//, 'https://');
+      return { ok: isApiOk(res), link };
     } catch (e) {
+      diag(`getOrToggleGroupLink failed: ${String(e)}`);
       return { ok: false, link: '', error: String(e) };
+    }
+  };
+
+  const addMembers = async (groupId, memberIds) => {
+    await ensureReady();
+    const rawId = stripG(groupId);
+    const gId = withG(groupId);
+    const uids = Array.isArray(memberIds) ? Array.from(new Set(memberIds.map(cleanUid).filter(Boolean))) : [];
+    if (!uids.length) return { ok: false, addedCount: 0, error: 'Chưa chọn thành viên' };
+
+    const friendSrc = safe(() => S.consts.MEMBERS_TRACKING_SOURCE.friend, -1);
+    const memberTypes = uids.map(() => friendSrc);
+    const profiles = uids.map((uid) => profileForMember(uid));
+
+    try {
+      let res = null;
+      if (S.rawApi && typeof S.rawApi.inviteMemberV2 === 'function') {
+        res = await Promise.resolve(S.rawApi.inviteMemberV2({ grid: rawId, members: uids, memberTypes }));
+      } else if (S.groups && typeof S.groups.addMemberToGroup === 'function') {
+        const objs = profiles.map((p) => ({ id: p.id, avatar: p.avatar, dName: p.name }));
+        res = await Promise.resolve(S.groups.addMemberToGroup(gId, objs, memberTypes));
+      } else if (S.fetcher && typeof S.fetcher.addMemberToGroupV2 === 'function') {
+        const users = profiles.map((p) => ({ userId: p.id, avatar: p.avatar, zaloName: p.name, displayName: p.name }));
+        res = await Promise.resolve(S.fetcher.addMemberToGroupV2(gId, users, memberTypes));
+      } else if (S.rawApi && typeof S.rawApi.inviteMember === 'function') {
+        res = await Promise.resolve(S.rawApi.inviteMember(rawId, uids));
+      }
+
+      if (!isApiOk(res)) {
+        const msg = str((res && (res.error_message || res.message)) || 'Không thể thêm thành viên');
+        return { ok: false, addedCount: 0, error: msg };
+      }
+
+      const dataObj = (res && res.data && typeof res.data === 'object') ? res.data : res;
+      const errMembers = Array.isArray(dataObj && dataObj.errorMembers) ? dataObj.errorMembers.map(cleanUid) : [];
+      const errSet = new Set(errMembers);
+      const addedCount = uids.filter((u) => !errSet.has(u)).length;
+      if (addedCount === 0) {
+        return { ok: false, addedCount: 0, error: 'Thành viên đã ở trong nhóm hoặc không cho phép thêm vào nhóm' };
+      }
+      return { ok: true, addedCount, error: errMembers.length ? `Không thể thêm ${errMembers.length} người` : '' };
+    } catch (e) {
+      diag(`addMembers failed: ${String(e)}`);
+      return { ok: false, addedCount: 0, error: str(e && (e.error_message || e.message)) || String(e) };
     }
   };
 
@@ -399,6 +504,7 @@
   window[NAME] = {
     getGroupAdminInfo,
     setDeputy,
+    addMembers,
     removeMember,
     updateSettings,
     getOrToggleGroupLink,

@@ -17,6 +17,13 @@ struct ChatInspector: View {
     @State private var reminderSheet: ReminderRequest?
     @State private var reminderComposeInfo: ReminderComposeInfo?
     @State private var showAllReminders = false
+    @State private var showAllMembers = false
+    @State private var memberSearch = ""
+    @State private var showAddMembers = false
+    @State private var addMemberSearch = ""
+    @State private var selectedNewMemberIds: Set<String> = []
+    @State private var addingMembers = false
+    @State private var addMemberError: String?
     @State private var groupAdmin: GroupAdminState?
     @State private var groupNotes: [GroupNoteItem] = []
     @State private var showNoteCreate = false
@@ -61,6 +68,8 @@ struct ChatInspector: View {
         }
         .sheet(isPresented: $showPollCreate) { PollCreateSheet(conversationId: id) }
         .sheet(isPresented: $showNoteCreate) { groupNoteCreateSheet }
+        .sheet(isPresented: $showAllMembers) { groupMembersSheet }
+        .sheet(isPresented: $showAddMembers) { addGroupMembersSheet }
         .sheet(item: $reminderSheet) { req in
             ReminderDetailSheet(request: req).cardNoticeOverlay()
         }
@@ -169,7 +178,13 @@ struct ChatInspector: View {
                 }
                 // Official 1:1 info panel button STR_BTN_CREATE_CONVERSATION_GROUP ("Tạo nhóm trò chuyện", shortened for the slot),
                 // with this friend already picked.
-                if !conversation.isGroup, id != engine.selfConversationId, engine.contacts.friends.contains(where: { $0.id == id }) {
+                if conversation.isGroup {
+                    ActionSlot("Thêm TV") {
+                        Button { openAddMembersSheet() } label: { actionGlyph("person.badge.plus") }
+                            .glassAction()
+                            .help("Thêm thành viên vào nhóm")
+                    }
+                } else if id != engine.selfConversationId, engine.contacts.friends.contains(where: { $0.id == id }) {
                     ActionSlot("Tạo nhóm") {
                         Button { shell.composeGroup(with: [id]) } label: { actionGlyph("person.2.badge.plus") }
                             .glassAction()
@@ -345,74 +360,45 @@ struct ChatInspector: View {
         let resolvedMembers = mergedGroupMembers
         if !resolvedMembers.isEmpty {
             let shown = Array(resolvedMembers.prefix(memberLimit))
+            let totalCount = max(conversation.members, resolvedMembers.count)
             let canManage = groupAdmin?.canManage(userId: engine.profile?.userId) ?? false
             let isOwner = groupAdmin?.role(for: engine.profile?.userId) == .owner
-            section("Thành viên", trailing: conversation.members > 0 ? "\(conversation.members)" : "\(resolvedMembers.count)") {
+            section(
+                "Thành viên",
+                trailing: totalCount > 0 ? "\(totalCount)" : "\(resolvedMembers.count)",
+                seeAll: totalCount > shown.count || resolvedMembers.count > memberLimit ? {
+                    memberSearch = ""
+                    showAllMembers = true
+                } : nil
+            ) {
                 list {
-                    ForEach(Array(shown.enumerated()), id: \.element.id) { index, member in
-                        if index > 0 { Divider().padding(.leading, 46) }
-                        Button { engine.openContactConversation(member.id) } label: {
-                            HStack(spacing: 10) {
-                                RemoteAvatar(url: member.avatar, name: member.name, size: 26)
-                                Text(member.name).font(.system(size: 13)).lineLimit(1)
+                    row(symbol: "person.badge.plus", title: "Thêm thành viên") {
+                        openAddMembersSheet()
+                    }
+                    ForEach(Array(shown.enumerated()), id: \.element.id) { _, member in
+                        Divider().padding(.leading, 46)
+                        memberRowView(member, canManage: canManage, isOwner: isOwner)
+                    }
+                    if totalCount > shown.count {
+                        Divider()
+                        Button {
+                            memberSearch = ""
+                            showAllMembers = true
+                        } label: {
+                            HStack {
+                                Text("Xem tất cả \(totalCount) thành viên")
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(.tint)
                                 Spacer(minLength: 4)
-                                if let roleLabel = member.role.label {
-                                    Text(roleLabel)
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(member.role == .owner ? Color.orange : Color.accentColor)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(
-                                            (member.role == .owner ? Color.orange : Color.accentColor).opacity(0.14),
-                                            in: Capsule()
-                                        )
-                                }
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
                             }
                             .padding(.horizontal, 12)
-                            .frame(minHeight: 38)
+                            .frame(maxWidth: .infinity, minHeight: 36)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("Nhắn tin với \(member.name)")
-                        .contextMenu {
-                            Button("Nhắn tin riêng", systemImage: "bubble.left") {
-                                engine.openContactConversation(member.id)
-                            }
-                            if canManage, member.id != engine.profile?.userId, member.role != .owner {
-                                Divider()
-                                if isOwner {
-                                    let makeDeputy = member.role != .admin
-                                    Button(
-                                        makeDeputy ? "Bổ nhiệm Phó nhóm" : "Gỡ quyền Phó nhóm",
-                                        systemImage: makeDeputy ? "person.badge.shield.checkmark" : "person.badge.minus"
-                                    ) {
-                                        runGroupAdminAction {
-                                            let ok = await engine.setGroupDeputy(in: id, memberId: member.id, isAdmin: makeDeputy)
-                                            if ok { await loadAdminExtras() }
-                                            return ok ? (makeDeputy ? "Đã bổ nhiệm Phó nhóm" : "Đã gỡ quyền Phó nhóm") : "Không thể cập nhật quyền"
-                                        }
-                                    }
-                                }
-                                Button("Mời khỏi nhóm", systemImage: "person.fill.xmark", role: .destructive) {
-                                    runGroupAdminAction {
-                                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: false)
-                                        if ok { await loadAdminExtras(); await loadMembers() }
-                                        return ok ? "Đã mời thành viên khỏi nhóm" : "Không thể mời thành viên"
-                                    }
-                                }
-                                Button("Chặn khỏi nhóm", systemImage: "hand.raised.fill", role: .destructive) {
-                                    runGroupAdminAction {
-                                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: true)
-                                        if ok { await loadAdminExtras(); await loadMembers() }
-                                        return ok ? "Đã chặn thành viên khỏi nhóm" : "Không thể chặn thành viên"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if max(conversation.members, resolvedMembers.count) > shown.count {
-                        Divider()
-                        emptyLine("và \(max(conversation.members, resolvedMembers.count) - shown.count) thành viên khác")
                     }
                 }
             }
@@ -423,15 +409,288 @@ struct ChatInspector: View {
         }
     }
 
-    private var mergedGroupMembers: [GroupMemberItem] {
-        if let adminMembers = groupAdmin?.members, !adminMembers.isEmpty {
-            return adminMembers
+    @ViewBuilder
+    private func memberRowView(_ member: GroupMemberItem, canManage: Bool, isOwner: Bool) -> some View {
+        Button {
+            showAllMembers = false
+            engine.openContactConversation(member.id)
+        } label: {
+            HStack(spacing: 10) {
+                RemoteAvatar(url: member.avatar, name: member.name, size: 26)
+                Text(member.name).font(.system(size: 13)).lineLimit(1)
+                Spacer(minLength: 4)
+                if let roleLabel = member.role.label {
+                    Text(roleLabel)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(member.role == .owner ? Color.orange : Color.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            (member.role == .owner ? Color.orange : Color.accentColor).opacity(0.14),
+                            in: Capsule()
+                        )
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 38)
+            .contentShape(Rectangle())
         }
-        guard let members else { return [] }
-        return members.map { candidate in
+        .buttonStyle(.plain)
+        .help("Nhắn tin với \(member.name)")
+        .contextMenu {
+            Button("Nhắn tin riêng", systemImage: "bubble.left") {
+                showAllMembers = false
+                engine.openContactConversation(member.id)
+            }
+            if canManage, member.id != engine.profile?.userId, member.role != .owner {
+                Divider()
+                if isOwner {
+                    let makeDeputy = member.role != .admin
+                    Button(
+                        makeDeputy ? "Bổ nhiệm Phó nhóm" : "Gỡ quyền Phó nhóm",
+                        systemImage: makeDeputy ? "person.badge.shield.checkmark" : "person.badge.minus"
+                    ) {
+                        runGroupAdminAction {
+                            let ok = await engine.setGroupDeputy(in: id, memberId: member.id, isAdmin: makeDeputy)
+                            if ok { await loadAdminExtras() }
+                            return ok ? (makeDeputy ? "Đã bổ nhiệm Phó nhóm" : "Đã gỡ quyền Phó nhóm") : "Không thể cập nhật quyền"
+                        }
+                    }
+                }
+                Button("Mời khỏi nhóm", systemImage: "person.fill.xmark", role: .destructive) {
+                    runGroupAdminAction {
+                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: false)
+                        if ok { await loadAdminExtras(); await loadMembers() }
+                        return ok ? "Đã mời thành viên khỏi nhóm" : "Không thể mời thành viên"
+                    }
+                }
+                Button("Chặn khỏi nhóm", systemImage: "hand.raised.fill", role: .destructive) {
+                    runGroupAdminAction {
+                        let ok = await engine.kickGroupMember(in: id, memberId: member.id, block: true)
+                        if ok { await loadAdminExtras(); await loadMembers() }
+                        return ok ? "Đã chặn thành viên khỏi nhóm" : "Không thể chặn thành viên"
+                    }
+                }
+            }
+        }
+    }
+
+    private var groupMembersSheet: some View {
+        let resolvedMembers = mergedGroupMembers
+        let query = memberSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = query.isEmpty ? resolvedMembers : resolvedMembers.filter {
+            $0.name.localizedStandardContains(query) || ($0.role.label?.localizedStandardContains(query) ?? false)
+        }
+        let canManage = groupAdmin?.canManage(userId: engine.profile?.userId) ?? false
+        let isOwner = groupAdmin?.role(for: engine.profile?.userId) == .owner
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Thành viên nhóm (\(max(conversation.members, resolvedMembers.count)))")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button("Thêm", systemImage: "person.badge.plus") {
+                    showAllMembers = false
+                    openAddMembersSheet()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button("Đóng") { showAllMembers = false }
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                TextField("Tìm thành viên…", text: $memberSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !memberSearch.isEmpty {
+                    Button { memberSearch = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+
+            if let groupActionFeedback {
+                Text(groupActionFeedback)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if filtered.isEmpty {
+                        emptyLine("Không tìm thấy thành viên phù hợp")
+                    } else {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { index, member in
+                            if index > 0 { Divider().padding(.leading, 46) }
+                            memberRowView(member, canManage: canManage, isOwner: isOwner)
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(16)
+        .frame(width: 380, height: 480)
+    }
+
+    private func openAddMembersSheet() {
+        addMemberSearch = ""
+        selectedNewMemberIds = []
+        addMemberError = nil
+        showAddMembers = true
+    }
+
+    private var addGroupMembersSheet: some View {
+        let existingIds = Set(mergedGroupMembers.map(\.id))
+        let candidates = engine.visibleFriends.filter { friend in
+            friend.id != engine.selfConversationId && !existingIds.contains(friend.id)
+        }
+        let query = addMemberSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let folded = query.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        let filtered = query.isEmpty ? candidates : candidates.filter { friend in
+            friend.name.localizedStandardContains(query) || friend.sortKey.contains(folded)
+        }
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Thêm thành viên vào nhóm")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button("Hủy") { showAddMembers = false }
+                    .disabled(addingMembers)
+            }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                TextField("Tìm bạn bè…", text: $addMemberSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !addMemberSearch.isEmpty {
+                    Button { addMemberSearch = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+
+            if let addMemberError {
+                Text(addMemberError)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if !engine.contacts.friendsLoaded {
+                        ProgressView("Đang tải danh sách bạn bè…")
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity, minHeight: 80)
+                    } else if filtered.isEmpty {
+                        emptyLine(candidates.isEmpty ? "Tất cả bạn bè đã ở trong nhóm" : "Không tìm thấy bạn bè phù hợp")
+                    } else {
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { index, friend in
+                            if index > 0 { Divider().padding(.leading, 46) }
+                            let picked = selectedNewMemberIds.contains(friend.id)
+                            Button {
+                                if picked {
+                                    selectedNewMemberIds.remove(friend.id)
+                                } else {
+                                    selectedNewMemberIds.insert(friend.id)
+                                }
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 17))
+                                        .foregroundStyle(picked ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.secondary.opacity(0.6)))
+                                    RemoteAvatar(url: friend.avatar, name: friend.name, size: 28)
+                                    Text(friend.name).font(.system(size: 13)).lineLimit(1)
+                                    Spacer(minLength: 4)
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(minHeight: 40)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack {
+                Text(selectedNewMemberIds.isEmpty ? "Chọn bạn bè để mời vào nhóm" : "Đã chọn \(selectedNewMemberIds.count) người")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    let ids = Array(selectedNewMemberIds)
+                    guard !ids.isEmpty, !addingMembers else { return }
+                    addingMembers = true
+                    addMemberError = nil
+                    let target = id
+                    Task {
+                        defer { addingMembers = false }
+                        let result = await engine.addGroupMembers(in: target, memberIds: ids)
+                        if result.ok {
+                            showAddMembers = false
+                            groupActionFeedback = "Đã thêm \(result.addedCount) thành viên vào nhóm"
+                            await loadAdminExtras()
+                            await loadMembers()
+                        } else {
+                            addMemberError = result.errorMessage ?? "Không thể thêm thành viên"
+                        }
+                    }
+                } label: {
+                    if addingMembers {
+                        ProgressView().controlSize(.small).frame(width: 60)
+                    } else {
+                        Text(selectedNewMemberIds.isEmpty ? "Thêm" : "Thêm (\(selectedNewMemberIds.count))")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedNewMemberIds.isEmpty || addingMembers)
+            }
+        }
+        .padding(16)
+        .frame(width: 390, height: 500)
+        .disabled(addingMembers)
+    }
+
+    private var mergedGroupMembers: [GroupMemberItem] {
+        var byId: [String: GroupMemberItem] = [:]
+        for item in groupAdmin?.members ?? [] {
+            byId[item.id] = item
+        }
+        for candidate in members ?? [] {
             let role = groupAdmin?.role(for: candidate.id) ?? .member
-            return GroupMemberItem(id: candidate.id, name: candidate.name, avatar: candidate.avatar, role: role)
-        }.sorted { lhs, rhs in
+            if let existing = byId[candidate.id] {
+                let betterName = (existing.name == existing.id || existing.name == "Thành viên") ? candidate.name : existing.name
+                let betterAvatar = existing.avatar ?? candidate.avatar
+                let betterRole = existing.role != .member ? existing.role : role
+                byId[candidate.id] = GroupMemberItem(id: candidate.id, name: betterName, avatar: betterAvatar, role: betterRole)
+            } else {
+                byId[candidate.id] = GroupMemberItem(id: candidate.id, name: candidate.name, avatar: candidate.avatar, role: role)
+            }
+        }
+        return byId.values.sorted { lhs, rhs in
             if lhs.role.sortPriority != rhs.role.sortPriority {
                 return lhs.role.sortPriority < rhs.role.sortPriority
             }

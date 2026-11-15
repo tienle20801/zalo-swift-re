@@ -67,6 +67,12 @@ struct QuickMessageTemplate: Identifiable, Equatable, Codable, Sendable {
     var content: String
 }
 
+struct AddGroupMembersResult: Equatable, Sendable {
+    let ok: Bool
+    let addedCount: Int
+    let errorMessage: String?
+}
+
 extension ZaloEngine {
     func loadGroupAdminState(for groupId: String) async -> GroupAdminState? {
         guard let dict = await evaluateGroupAdmin("getGroupAdminInfo", [groupId]) as? [String: Any] else {
@@ -117,6 +123,18 @@ extension ZaloEngine {
     func kickGroupMember(in groupId: String, memberId: String, block: Bool = false) async -> Bool {
         let res = await evaluateGroupAdmin("removeMember", [groupId, memberId, block]) as? [String: Any]
         return (res?["ok"] as? NSNumber)?.boolValue ?? false
+    }
+
+    func addGroupMembers(in groupId: String, memberIds: [String]) async -> AddGroupMembersResult {
+        let clean = memberIds.filter { !$0.isEmpty }
+        guard !clean.isEmpty else {
+            return AddGroupMembersResult(ok: false, addedCount: 0, errorMessage: "Chưa chọn thành viên")
+        }
+        let res = await evaluateGroupAdmin("addMembers", [groupId, clean]) as? [String: Any]
+        let ok = (res?["ok"] as? NSNumber)?.boolValue ?? false
+        let added = (res?["addedCount"] as? NSNumber)?.intValue ?? (ok ? clean.count : 0)
+        let err = (res?["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return AddGroupMembersResult(ok: ok, addedCount: added, errorMessage: err)
     }
 
     func updateGroupSettings(in groupId: String, lockSendMsg: Bool, lockUpdateInfo: Bool, joinAppr: Bool) async -> Bool {
